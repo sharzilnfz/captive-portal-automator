@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import readline from 'readline';
+import { fileURLToPath } from 'url';
 
 export function getSSID() {
   try {
@@ -187,7 +188,8 @@ export function saveCredentials(ssid, loginUrl, formDetails, username, password,
     usernameField: formDetails.usernameField,
     passwordField: formDetails.passwordField,
     staticFields: formDetails.fields,
-    action: formDetails.action
+    action: formDetails.action,
+    method: formDetails.method || 'POST'
   };
 
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600, encoding: 'utf8' });
@@ -214,25 +216,41 @@ export function promptUser(query) {
 }
 
 export async function submitLogin(action, method, payload) {
-  const body = new URLSearchParams(payload).toString();
+  const normalizedMethod = (method || 'POST').toUpperCase();
+  let targetUrl = action;
   const options = {
-    method: method,
+    method: normalizedMethod,
     headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     },
     signal: AbortSignal.timeout(10000)
   };
-  if (method === 'POST') {
-    options.body = body;
+
+  if (normalizedMethod === 'GET') {
+    const urlObj = new URL(action);
+    const params = new URLSearchParams(payload);
+    for (const [key, value] of params) {
+      urlObj.searchParams.append(key, value);
+    }
+    targetUrl = urlObj.href;
+  } else if (normalizedMethod === 'POST') {
+    options.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+    options.body = new URLSearchParams(payload).toString();
   }
 
-  const res = await fetch(action, options);
+  const res = await fetch(targetUrl, options);
   return res;
 }
 
 export async function runAutomator(configPath = getConfigPath(), probeUrl = 'http://captive.apple.com/hotspot-detect.html') {
-  const ssid = process.env.CAPAUTO_TEST_SSID || getSSID();
+  let ssid = process.env.CAPAUTO_TEST_SSID;
+  if (!ssid) {
+    try {
+      ssid = getSSID();
+    } catch (err) {
+      ssid = 'Unknown_WiFi';
+    }
+  }
   console.log(`[${new Date().toISOString()}] Checking network connection on Wi-Fi: "${ssid}"...`);
 
   const status = await checkConnectivity(probeUrl);
@@ -302,7 +320,7 @@ export async function runAutomator(configPath = getConfigPath(), probeUrl = 'htt
 
   console.log(`Submitting login request to: ${credentials.action}...`);
   try {
-    await submitLogin(credentials.action, 'POST', payload);
+    await submitLogin(credentials.action, credentials.method || 'POST', payload);
     console.log('Form submitted. Verifying internet connectivity...');
     
     // Wait 2 seconds for portal to register
@@ -323,7 +341,11 @@ export async function runAutomator(configPath = getConfigPath(), probeUrl = 'htt
 }
 
 // Self-execute if run directly (not imported by test)
-if (process.argv[1] === import.meta.url || process.argv[1]?.endsWith('index.js')) {
+const nodePath = process.argv[1] ? fs.realpathSync(process.argv[1]) : null;
+const currentPath = fileURLToPath(import.meta.url);
+const isMain = nodePath === currentPath || (nodePath && nodePath === fs.realpathSync(currentPath));
+
+if (isMain) {
   runAutomator().then(success => {
     process.exit(success ? 0 : 1);
   }).catch(err => {

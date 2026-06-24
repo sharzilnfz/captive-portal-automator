@@ -50,11 +50,28 @@ export class MockPortal {
         }
 
         // 3. Handle Authentication Submit
-        if (req.url === '/auth' && req.method === 'POST') {
-          let body = '';
-          req.on('data', chunk => { body += chunk; });
-          req.on('end', () => {
-            const params = new URLSearchParams(body);
+        if (req.url.startsWith('/auth')) {
+          if (req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; });
+            req.on('end', () => {
+              const params = new URLSearchParams(body);
+              if (
+                params.get('username_field') === 'student123' &&
+                params.get('password_field') === 'securepass' &&
+                params.get('csrf') === 'mock-csrf-token-123'
+              ) {
+                this.isOnline = true;
+                res.writeHead(200, { 'Content-Type': 'text/html' });
+                res.end('<h1>Logged In Successfully!</h1>');
+              } else {
+                res.writeHead(401, { 'Content-Type': 'text/html' });
+                res.end('<h1>Unauthorized</h1>');
+              }
+            });
+          } else if (req.method === 'GET') {
+            const urlObj = new URL(req.url, `http://localhost:${this.port}`);
+            const params = urlObj.searchParams;
             if (
               params.get('username_field') === 'student123' &&
               params.get('password_field') === 'securepass' &&
@@ -67,7 +84,7 @@ export class MockPortal {
               res.writeHead(401, { 'Content-Type': 'text/html' });
               res.end('<h1>Unauthorized</h1>');
             }
-          });
+          }
           return;
         }
 

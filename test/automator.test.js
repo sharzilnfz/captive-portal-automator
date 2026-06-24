@@ -185,7 +185,7 @@ async function runTests() {
     saveCredentials(
       'Mock_WiFi',
       'http://localhost:8080/login',
-      { usernameField: 'username_field', passwordField: 'password_field', action: 'http://localhost:8080/auth', fields: { csrf: 'mock-csrf-token-123', session: 'xyz987' } },
+      { usernameField: 'username_field', passwordField: 'password_field', action: 'http://localhost:8080/auth', method: 'POST', fields: { csrf: 'mock-csrf-token-123', session: 'xyz987' } },
       'student123',
       'securepass',
       integrationConfigPath
@@ -197,7 +197,7 @@ async function runTests() {
     // Mock SSID detection in environment
     process.env.CAPAUTO_TEST_SSID = 'Mock_WiFi';
 
-    console.log('Running integration automation test...');
+    console.log('Running integration automation test (POST)...');
     const success = await runAutomator(integrationConfigPath, 'http://localhost:8080/hotspot-detect.html');
     if (!success) {
       throw new Error('Integration runAutomator failed');
@@ -208,7 +208,36 @@ async function runTests() {
 
     // Cleanup
     if (fs.existsSync(integrationConfigPath)) fs.unlinkSync(integrationConfigPath);
-    console.log('T5 PASS: Complete end-to-end flow connects and logs into portal successfully.');
+    console.log('T5 PASS: Complete end-to-end flow connects and logs into portal successfully (POST).');
+
+    // Task 5.2: Integration test with GET method
+    const getIntegrationConfigPath = path.join(process.cwd(), 'get-integration-config.json');
+    if (fs.existsSync(getIntegrationConfigPath)) fs.unlinkSync(getIntegrationConfigPath);
+
+    saveCredentials(
+      'Mock_WiFi_GET',
+      'http://localhost:8080/login',
+      { usernameField: 'username_field', passwordField: 'password_field', action: 'http://localhost:8080/auth', method: 'GET', fields: { csrf: 'mock-csrf-token-123', session: 'xyz987' } },
+      'student123',
+      'securepass',
+      getIntegrationConfigPath
+    );
+
+    portal.isOnline = false;
+    process.env.CAPAUTO_TEST_SSID = 'Mock_WiFi_GET';
+
+    console.log('Running integration automation test (GET)...');
+    const getSuccess = await runAutomator(getIntegrationConfigPath, 'http://localhost:8080/hotspot-detect.html');
+    if (!getSuccess) {
+      throw new Error('Integration runAutomator with GET failed');
+    }
+    if (!portal.isOnline) {
+      throw new Error('Portal did not record transition to online after GET automation');
+    }
+
+    // Cleanup
+    if (fs.existsSync(getIntegrationConfigPath)) fs.unlinkSync(getIntegrationConfigPath);
+    console.log('T5.2 PASS: Complete end-to-end flow connects and logs into portal successfully (GET).');
   } finally {
     await portal.stop();
     console.log('Mock Server stopped.');
