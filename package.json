@@ -1,0 +1,8 @@
+{
+  "name": "captive-portal-automator",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node test/automator.test.js"
+  }
+}
