@@ -70,13 +70,81 @@ async function runTests() {
       throw new Error(`Expected method 'GET', got '${parsed2.method}'`);
     }
     if (parsed2.usernameField !== 'email_addr') {
-      throw new Error(`Expected fallback username field 'email_addr', got '${parsed2.usernameField}'`);
+      throw new Error(`Expected username field 'email_addr', got '${parsed2.usernameField}'`);
     }
     if (parsed2.passwordField !== 'pass') {
       throw new Error(`Expected password field 'pass', got '${parsed2.passwordField}'`);
     }
 
-    console.log('T3 PASS: Correctly parses HTML form elements and identifies inputs.');
+    // New Test Case 1: Unquoted attributes and spaces around equals signs
+    const unquotedHtml = `
+      <form action = /auth method = POST>
+        <input type = hidden name = csrf value = token123>
+        <input type = text name = username_field>
+        <input type = password name = password_field>
+      </form>
+    `;
+    const parsedUnquoted = parseLoginForm(unquotedHtml, 'http://localhost:8080/login');
+    if (parsedUnquoted.action !== 'http://localhost:8080/auth') {
+      throw new Error(`Expected action 'http://localhost:8080/auth', got '${parsedUnquoted.action}'`);
+    }
+    if (parsedUnquoted.usernameField !== 'username_field' || parsedUnquoted.passwordField !== 'password_field') {
+      throw new Error(`Expected username_field/password_field, got ${parsedUnquoted.usernameField}/${parsedUnquoted.passwordField}`);
+    }
+    if (parsedUnquoted.fields.csrf !== 'token123') {
+      throw new Error(`Expected csrf 'token123', got '${parsedUnquoted.fields.csrf}'`);
+    }
+
+    // New Test Case 2: Multiple forms on a page, prioritizing the one with a password input
+    const multiFormHtml = `
+      <html>
+        <!-- Form 1: Language selection (no password field) -->
+        <form action="/lang" method="GET">
+          <input type="submit" name="lang" value="en">
+          <input type="submit" name="lang" value="es">
+        </form>
+        <!-- Form 2: Actual login form (has password field) -->
+        <form action="/login-submit" method="POST">
+          <input type="text" name="email">
+          <input type="password" name="pass">
+        </form>
+      </html>
+    `;
+    const parsedMulti = parseLoginForm(multiFormHtml, 'http://localhost:8080/login');
+    if (parsedMulti.action !== 'http://localhost:8080/login-submit') {
+      throw new Error(`Expected action 'http://localhost:8080/login-submit' from prioritized login form, got '${parsedMulti.action}'`);
+    }
+    if (parsedMulti.usernameField !== 'email' || parsedMulti.passwordField !== 'pass') {
+      throw new Error(`Expected email/pass from prioritized login form, got ${parsedMulti.usernameField}/${parsedMulti.passwordField}`);
+    }
+
+    // New Test Case 3: Fallback username detection ignoring hidden/submit inputs
+    const fallbackHtml = `
+      <form action="/login" method="POST">
+        <input type="hidden" name="csrf" value="xyz">
+        <input type="submit" name="submit-btn" value="Login">
+        <input type="text" name="weird_username_field">
+        <input type="password" name="pass">
+      </form>
+    `;
+    const parsedFallback = parseLoginForm(fallbackHtml, 'http://localhost:8080/login');
+    if (parsedFallback.usernameField !== 'weird_username_field') {
+      throw new Error(`Expected fallback username field 'weird_username_field', got '${parsedFallback.usernameField}'`);
+    }
+
+    // New Test Case 4: Guest-portal keywords (phone, mobile, telephone)
+    const keywordsHtml = `
+      <form action="/login" method="POST">
+        <input type="text" name="phone">
+        <input type="password" name="pass">
+      </form>
+    `;
+    const parsedKeywords = parseLoginForm(keywordsHtml, 'http://localhost:8080/login');
+    if (parsedKeywords.usernameField !== 'phone') {
+      throw new Error(`Expected username field 'phone', got '${parsedKeywords.usernameField}'`);
+    }
+
+    console.log('T3 PASS: Correctly parses HTML form elements and identifies inputs (including multi-form, unquoted attributes, and robust fallback username detection).');
   } finally {
     await portal.stop();
     console.log('Mock Server stopped.');

@@ -54,75 +54,101 @@ export async function checkConnectivity(probeUrl = 'http://captive.apple.com/hot
   }
 }
 
+function getAttr(attrs, attrName) {
+  const regex = new RegExp('(?:^|\\s)' + attrName + '\\s*=\\s*(?:["\']([^\'"]*)["\']|([^\\s>]+))', 'i');
+  const match = attrs.match(regex);
+  return match ? (match[1] !== undefined ? match[1] : match[2]) : null;
+}
+
 export function parseLoginForm(html, baseUrl) {
-  // 1. Extract <form> tag and contents using regex
-  const formRegex = /<form([^>]*?)>([\s\S]*?)<\/form>/i;
-  const formMatch = html.match(formRegex);
-  if (!formMatch) {
+  // Find all <form> elements on the page
+  const formRegex = /<form([^>]*?)>([\s\S]*?)<\/form>/gi;
+  const formMatches = [];
+  let formMatch;
+  while ((formMatch = formRegex.exec(html)) !== null) {
+    formMatches.push(formMatch);
+  }
+
+  if (formMatches.length === 0) {
     throw new Error('No form element found on the login page');
   }
 
-  const formAttributes = formMatch[1];
-  const formContent = formMatch[2];
+  // Parse each form
+  const parsedForms = formMatches.map(match => {
+    const formAttributes = match[1];
+    const formContent = match[2];
 
-  // Extract action and method
-  const actionMatch = formAttributes.match(/action=["']([^"']+)["']/i);
-  let action = actionMatch ? actionMatch[1] : '';
-  const methodMatch = formAttributes.match(/method=["']([^"']+)["']/i);
-  const method = methodMatch ? methodMatch[1].toUpperCase() : 'POST';
+    // Extract action and method using getAttr
+    let action = getAttr(formAttributes, 'action') || '';
+    const method = (getAttr(formAttributes, 'method') || 'POST').toUpperCase();
 
-  // Resolve relative action URLs
-  if (action && !action.startsWith('http')) {
-    const url = new URL(action, baseUrl);
-    action = url.href;
-  } else if (!action) {
-    action = baseUrl;
-  }
+    // Resolve relative action URLs
+    if (action && !action.startsWith('http')) {
+      const url = new URL(action, baseUrl);
+      action = url.href;
+    } else if (!action) {
+      action = baseUrl;
+    }
 
-  // 2. Parse all <input> tags inside the form
-  const inputRegex = /<input([^>]*?)>/gi;
-  const fields = {};
-  let usernameField = '';
-  let passwordField = '';
+    // Parse all <input> tags inside the form
+    const inputRegex = /<input([^>]*?)>/gi;
+    const fields = {};
+    let usernameField = '';
+    let passwordField = '';
+    const textInputNames = [];
 
-  let match;
-  while ((match = inputRegex.exec(formContent)) !== null) {
-    const attrs = match[1];
-    const nameMatch = attrs.match(/name=["']([^"']+)["']/i);
-    const typeMatch = attrs.match(/type=["']([^"']+)["']/i);
-    const valueMatch = attrs.match(/value=["']([^"']+)["']/i);
+    let inputMatch;
+    while ((inputMatch = inputRegex.exec(formContent)) !== null) {
+      const attrs = inputMatch[1];
+      const name = getAttr(attrs, 'name');
+      if (!name) continue;
 
-    if (!nameMatch) continue;
+      const type = (getAttr(attrs, 'type') || 'text').toLowerCase();
+      const value = getAttr(attrs, 'value') || '';
 
-    const name = nameMatch[1];
-    const type = typeMatch ? typeMatch[1].toLowerCase() : 'text';
-    const value = valueMatch ? valueMatch[1] : '';
+      fields[name] = value;
 
-    fields[name] = value;
+      if (type === 'password') {
+        passwordField = name;
+      } else if (type === 'text' || type === 'email') {
+        textInputNames.push(name);
 
-    if (type === 'password') {
-      passwordField = name;
-    } else if (type === 'text' || type === 'email') {
-      const nameLower = name.toLowerCase();
-      if (
-        nameLower.includes('user') ||
-        nameLower.includes('login') ||
-        nameLower.includes('id') ||
-        nameLower.includes('member')
-      ) {
-        usernameField = name;
+        const nameLower = name.toLowerCase();
+        if (
+          nameLower.includes('user') ||
+          nameLower.includes('login') ||
+          nameLower.includes('id') ||
+          nameLower.includes('member') ||
+          nameLower.includes('email') ||
+          nameLower.includes('phone') ||
+          nameLower.includes('mobile') ||
+          nameLower.includes('telephone')
+        ) {
+          if (!usernameField) {
+            usernameField = name;
+          }
+        }
       }
     }
-  }
 
-  // Fallback if username field not matched by keywords
-  if (!usernameField && passwordField) {
-    const remainingKeys = Object.keys(fields).filter(k => k !== passwordField && k !== 'csrf');
-    if (remainingKeys.length > 0) {
-      usernameField = remainingKeys[0];
+    // Fallback if username field not matched by keywords
+    if (!usernameField && passwordField) {
+      const candidates = textInputNames.filter(name => name !== passwordField);
+      if (candidates.length > 0) {
+        usernameField = candidates[0];
+      }
     }
+
+    return { action, method, fields, usernameField, passwordField };
+  });
+
+  // Prioritize forms containing a password input
+  const loginForm = parsedForms.find(f => f.passwordField);
+  if (loginForm) {
+    return loginForm;
   }
 
-  return { action, method, fields, usernameField, passwordField };
+  // Fallback to the first form on the page
+  return parsedForms[0];
 }
 
