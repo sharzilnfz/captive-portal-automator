@@ -213,3 +213,122 @@ export function promptUser(query) {
   }));
 }
 
+export async function submitLogin(action, method, payload) {
+  const body = new URLSearchParams(payload).toString();
+  const options = {
+    method: method,
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    },
+    signal: AbortSignal.timeout(10000)
+  };
+  if (method === 'POST') {
+    options.body = body;
+  }
+
+  const res = await fetch(action, options);
+  return res;
+}
+
+export async function runAutomator(configPath = getConfigPath(), probeUrl = 'http://captive.apple.com/hotspot-detect.html') {
+  const ssid = process.env.CAPAUTO_TEST_SSID || getSSID();
+  console.log(`[${new Date().toISOString()}] Checking network connection on Wi-Fi: "${ssid}"...`);
+
+  const status = await checkConnectivity(probeUrl);
+  if (status.online) {
+    console.log('Already online. Exiting.');
+    return true;
+  }
+
+  if (!status.redirectUrl) {
+    console.log('Not online, but no captive portal redirection detected. Exiting.');
+    return false;
+  }
+
+  console.log(`Captive portal detected! Redirected to: ${status.redirectUrl}`);
+
+  // Load credentials
+  const config = loadConfig(configPath);
+  let credentials = config[ssid];
+
+  let username, password;
+  let formDetails;
+
+  if (!credentials) {
+    console.log(`No saved credentials found for SSID: "${ssid}". Initiating first-time setup...`);
+    console.log('Fetching login page to analyze form...');
+    const pageRes = await fetch(status.redirectUrl);
+    const html = await pageRes.text();
+
+    try {
+      formDetails = parseLoginForm(html, status.redirectUrl);
+    } catch (err) {
+      console.error('Failed to parse login form automatically:', err.message);
+      console.log('Please enter credentials, we will try to submit standard fields.');
+      formDetails = {
+        action: status.redirectUrl,
+        method: 'POST',
+        fields: {},
+        usernameField: 'username',
+        passwordField: 'password'
+      };
+    }
+
+    console.log(`Detected username field: "${formDetails.usernameField}"`);
+    console.log(`Detected password field: "${formDetails.passwordField}"`);
+
+    username = await promptUser('Enter your Wi-Fi username/ID: ');
+    password = await promptUser('Enter your Wi-Fi password: ');
+
+    if (!username || !password) {
+      console.error('Credentials cannot be empty. Aborting.');
+      return false;
+    }
+
+    saveCredentials(ssid, status.redirectUrl, formDetails, username, password, configPath);
+    console.log(`Credentials saved for SSID: "${ssid}"`);
+    
+    // Reload credentials
+    credentials = loadConfig(configPath)[ssid];
+  }
+
+  // Prepare payload
+  const payload = {
+    ...credentials.staticFields,
+    [credentials.usernameField]: credentials.username,
+    [credentials.passwordField]: credentials.password
+  };
+
+  console.log(`Submitting login request to: ${credentials.action}...`);
+  try {
+    await submitLogin(credentials.action, 'POST', payload);
+    console.log('Form submitted. Verifying internet connectivity...');
+    
+    // Wait 2 seconds for portal to register
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    const doubleCheck = await checkConnectivity(probeUrl);
+    if (doubleCheck.online) {
+      console.log('Success! Internet connection established.');
+      return true;
+    } else {
+      console.error('Form submitted but still redirected. Login might have failed or needs verification.');
+      return false;
+    }
+  } catch (err) {
+    console.error('Error submitting login form:', err.message);
+    return false;
+  }
+}
+
+// Self-execute if run directly (not imported by test)
+if (process.argv[1] === import.meta.url || process.argv[1]?.endsWith('index.js')) {
+  runAutomator().then(success => {
+    process.exit(success ? 0 : 1);
+  }).catch(err => {
+    console.error('Fatal execution error:', err);
+    process.exit(1);
+  });
+}
+

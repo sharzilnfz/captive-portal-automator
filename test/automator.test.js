@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { MockPortal } from './mock-portal.js';
-import { getSSID, checkConnectivity, parseLoginForm, loadConfig, saveCredentials } from '../index.js';
+import { getSSID, checkConnectivity, parseLoginForm, loadConfig, saveCredentials, runAutomator } from '../index.js';
 
 async function runTests() {
   console.log('Starting Mock Captive Portal Server...');
@@ -176,6 +176,39 @@ async function runTests() {
     // Cleanup
     if (fs.existsSync(testConfigPath)) fs.unlinkSync(testConfigPath);
     console.log('T4 PASS: Correctly stores and loads network-specific credentials with safe permissions.');
+
+    // Task 5: Integration test
+    const integrationConfigPath = path.join(process.cwd(), 'integration-config.json');
+    if (fs.existsSync(integrationConfigPath)) fs.unlinkSync(integrationConfigPath);
+
+    // Setup mock credentials for our mock server
+    saveCredentials(
+      'Mock_WiFi',
+      'http://localhost:8080/login',
+      { usernameField: 'username_field', passwordField: 'password_field', action: 'http://localhost:8080/auth', fields: { csrf: 'mock-csrf-token-123', session: 'xyz987' } },
+      'student123',
+      'securepass',
+      integrationConfigPath
+    );
+
+    // Start with offline portal
+    portal.isOnline = false;
+    
+    // Mock SSID detection in environment
+    process.env.CAPAUTO_TEST_SSID = 'Mock_WiFi';
+
+    console.log('Running integration automation test...');
+    const success = await runAutomator(integrationConfigPath, 'http://localhost:8080/hotspot-detect.html');
+    if (!success) {
+      throw new Error('Integration runAutomator failed');
+    }
+    if (!portal.isOnline) {
+      throw new Error('Portal did not record transition to online after automation');
+    }
+
+    // Cleanup
+    if (fs.existsSync(integrationConfigPath)) fs.unlinkSync(integrationConfigPath);
+    console.log('T5 PASS: Complete end-to-end flow connects and logs into portal successfully.');
   } finally {
     await portal.stop();
     console.log('Mock Server stopped.');
