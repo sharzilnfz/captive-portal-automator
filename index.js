@@ -53,3 +53,76 @@ export async function checkConnectivity(probeUrl = 'http://captive.apple.com/hot
     return { online: false, redirectUrl: null };
   }
 }
+
+export function parseLoginForm(html, baseUrl) {
+  // 1. Extract <form> tag and contents using regex
+  const formRegex = /<form([^>]*?)>([\s\S]*?)<\/form>/i;
+  const formMatch = html.match(formRegex);
+  if (!formMatch) {
+    throw new Error('No form element found on the login page');
+  }
+
+  const formAttributes = formMatch[1];
+  const formContent = formMatch[2];
+
+  // Extract action and method
+  const actionMatch = formAttributes.match(/action=["']([^"']+)["']/i);
+  let action = actionMatch ? actionMatch[1] : '';
+  const methodMatch = formAttributes.match(/method=["']([^"']+)["']/i);
+  const method = methodMatch ? methodMatch[1].toUpperCase() : 'POST';
+
+  // Resolve relative action URLs
+  if (action && !action.startsWith('http')) {
+    const url = new URL(action, baseUrl);
+    action = url.href;
+  } else if (!action) {
+    action = baseUrl;
+  }
+
+  // 2. Parse all <input> tags inside the form
+  const inputRegex = /<input([^>]*?)>/gi;
+  const fields = {};
+  let usernameField = '';
+  let passwordField = '';
+
+  let match;
+  while ((match = inputRegex.exec(formContent)) !== null) {
+    const attrs = match[1];
+    const nameMatch = attrs.match(/name=["']([^"']+)["']/i);
+    const typeMatch = attrs.match(/type=["']([^"']+)["']/i);
+    const valueMatch = attrs.match(/value=["']([^"']+)["']/i);
+
+    if (!nameMatch) continue;
+
+    const name = nameMatch[1];
+    const type = typeMatch ? typeMatch[1].toLowerCase() : 'text';
+    const value = valueMatch ? valueMatch[1] : '';
+
+    fields[name] = value;
+
+    if (type === 'password') {
+      passwordField = name;
+    } else if (type === 'text' || type === 'email') {
+      const nameLower = name.toLowerCase();
+      if (
+        nameLower.includes('user') ||
+        nameLower.includes('login') ||
+        nameLower.includes('id') ||
+        nameLower.includes('member')
+      ) {
+        usernameField = name;
+      }
+    }
+  }
+
+  // Fallback if username field not matched by keywords
+  if (!usernameField && passwordField) {
+    const remainingKeys = Object.keys(fields).filter(k => k !== passwordField && k !== 'csrf');
+    if (remainingKeys.length > 0) {
+      usernameField = remainingKeys[0];
+    }
+  }
+
+  return { action, method, fields, usernameField, passwordField };
+}
+
