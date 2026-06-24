@@ -5,6 +5,10 @@ import os from 'os';
 import readline from 'readline';
 import { fileURLToPath } from 'url';
 
+// Bypass SSL verification by default for captive portal requests.
+// Captive portal controllers frequently use self-signed or local-only certificates.
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 export function getSSID() {
   try {
     if (process.platform === 'darwin') {
@@ -169,7 +173,7 @@ export function loadConfig(configPath = getConfigPath()) {
       return JSON.parse(data);
     }
   } catch (e) {
-    // Ignore reading errors, return empty config
+    console.warn(`[Warning] Failed to parse config file at "${configPath}":`, e.message);
   }
   return {};
 }
@@ -177,7 +181,7 @@ export function loadConfig(configPath = getConfigPath()) {
 export function saveCredentials(ssid, loginUrl, formDetails, username, password, configPath = getConfigPath()) {
   const dir = path.dirname(configPath);
   if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
 
   const config = loadConfig(configPath);
@@ -205,6 +209,9 @@ export function saveCredentials(ssid, loginUrl, formDetails, username, password,
 }
 
 export function promptUser(query) {
+  if (!process.stdin.isTTY) {
+    return Promise.reject(new Error('Terminal is non-interactive, cannot prompt for credentials in background mode'));
+  }
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -230,7 +237,7 @@ export async function submitLogin(action, method, payload) {
     const urlObj = new URL(action);
     const params = new URLSearchParams(payload);
     for (const [key, value] of params) {
-      urlObj.searchParams.append(key, value);
+      urlObj.searchParams.set(key, value);
     }
     targetUrl = urlObj.href;
   } else if (normalizedMethod === 'POST') {
@@ -253,14 +260,29 @@ export async function runAutomator(configPath = getConfigPath(), probeUrl = 'htt
   }
   console.log(`[${new Date().toISOString()}] Checking network connection on Wi-Fi: "${ssid}"...`);
 
-  const status = await checkConnectivity(probeUrl);
+  let status = await checkConnectivity(probeUrl);
+  if (status.online) {
+    console.log('Already online. Exiting.');
+    return true;
+  }
+
+  // If not online and no redirect URL found immediately, retry up to 3 times with a 2-second delay.
+  // This gives the network interface time to stabilize and receive a DHCP lease when triggered by network changes.
+  let attempts = 1;
+  while (!status.online && !status.redirectUrl && attempts < 3) {
+    console.log(`Connection offline but no captive portal detected (attempt ${attempts}). Retrying in 2 seconds...`);
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    status = await checkConnectivity(probeUrl);
+    attempts++;
+  }
+
   if (status.online) {
     console.log('Already online. Exiting.');
     return true;
   }
 
   if (!status.redirectUrl) {
-    console.log('Not online, but no captive portal redirection detected. Exiting.');
+    console.log('Not online, and no captive portal redirection detected. Exiting.');
     return false;
   }
 
@@ -276,8 +298,15 @@ export async function runAutomator(configPath = getConfigPath(), probeUrl = 'htt
   if (!credentials) {
     console.log(`No saved credentials found for SSID: "${ssid}". Initiating first-time setup...`);
     console.log('Fetching login page to analyze form...');
-    const pageRes = await fetch(status.redirectUrl);
-    const html = await pageRes.text();
+    
+    let html = '';
+    try {
+      const pageRes = await fetch(status.redirectUrl, { signal: AbortSignal.timeout(10000) });
+      html = await pageRes.text();
+    } catch (err) {
+      console.error('Failed to fetch captive portal login page:', err.message);
+      return false;
+    }
 
     try {
       formDetails = parseLoginForm(html, status.redirectUrl);
@@ -341,7 +370,12 @@ export async function runAutomator(configPath = getConfigPath(), probeUrl = 'htt
 }
 
 // Self-execute if run directly (not imported by test)
-const nodePath = process.argv[1] ? fs.realpathSync(process.argv[1]) : null;
+let nodePath = null;
+try {
+  nodePath = process.argv[1] ? fs.realpathSync(process.argv[1]) : null;
+} catch (e) {
+  // Ignore realpath exceptions for virtual/non-existent paths
+}
 const currentPath = fileURLToPath(import.meta.url);
 const isMain = nodePath === currentPath || (nodePath && nodePath === fs.realpathSync(currentPath));
 
