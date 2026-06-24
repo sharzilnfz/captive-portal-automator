@@ -1,4 +1,8 @@
 import { execSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import readline from 'readline';
 
 export function getSSID() {
   try {
@@ -150,5 +154,62 @@ export function parseLoginForm(html, baseUrl) {
 
   // Fallback to the first form on the page
   return parsedForms[0];
+}
+
+export function getConfigPath() {
+  const home = os.homedir();
+  return path.join(home, '.capauto', 'config.json');
+}
+
+export function loadConfig(configPath = getConfigPath()) {
+  try {
+    if (fs.existsSync(configPath)) {
+      const data = fs.readFileSync(configPath, 'utf8');
+      return JSON.parse(data);
+    }
+  } catch (e) {
+    // Ignore reading errors, return empty config
+  }
+  return {};
+}
+
+export function saveCredentials(ssid, loginUrl, formDetails, username, password, configPath = getConfigPath()) {
+  const dir = path.dirname(configPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  const config = loadConfig(configPath);
+  config[ssid] = {
+    loginUrl,
+    username,
+    password,
+    usernameField: formDetails.usernameField,
+    passwordField: formDetails.passwordField,
+    staticFields: formDetails.fields,
+    action: formDetails.action
+  };
+
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+  
+  // Set user-only read/write permissions on macOS/Linux
+  if (process.platform !== 'win32') {
+    try {
+      fs.chmodSync(configPath, 0o600);
+    } catch (e) {
+      // Fallback
+    }
+  }
+}
+
+export function promptUser(query) {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  return new Promise((resolve) => rl.question(query, (ans) => {
+    rl.close();
+    resolve(ans);
+  }));
 }
 

@@ -1,5 +1,7 @@
+import fs from 'fs';
+import path from 'path';
 import { MockPortal } from './mock-portal.js';
-import { getSSID, checkConnectivity, parseLoginForm } from '../index.js';
+import { getSSID, checkConnectivity, parseLoginForm, loadConfig, saveCredentials } from '../index.js';
 
 async function runTests() {
   console.log('Starting Mock Captive Portal Server...');
@@ -145,6 +147,35 @@ async function runTests() {
     }
 
     console.log('T3 PASS: Correctly parses HTML form elements and identifies inputs (including multi-form, unquoted attributes, and robust fallback username detection).');
+
+    // Task 4: Interactive Setup & Credentials Storage
+    const testConfigPath = path.join(process.cwd(), 'test-config.json');
+    if (fs.existsSync(testConfigPath)) fs.unlinkSync(testConfigPath);
+
+    // Load missing config
+    const config1 = loadConfig(testConfigPath);
+    if (Object.keys(config1).length !== 0) throw new Error('Expected empty config');
+
+    // Save config
+    saveCredentials('Test_Uni_WiFi', 'http://localhost/login', { usernameField: 'user', passwordField: 'pass', fields: { csrf: '12' } }, 'stud', 'pass1', testConfigPath);
+    
+    const config2 = loadConfig(testConfigPath);
+    if (!config2['Test_Uni_WiFi'] || config2['Test_Uni_WiFi'].username !== 'stud') {
+      throw new Error('Config failed to save or load credentials correctly');
+    }
+
+    // Verify permission restrictions on the config file (0o600 on Unix)
+    if (process.platform !== 'win32') {
+      const stat = fs.statSync(testConfigPath);
+      const mode = stat.mode & 0o777;
+      if (mode !== 0o600) {
+        throw new Error(`Expected file mode 0600, got ${mode.toString(8)}`);
+      }
+    }
+
+    // Cleanup
+    if (fs.existsSync(testConfigPath)) fs.unlinkSync(testConfigPath);
+    console.log('T4 PASS: Correctly stores and loads network-specific credentials with safe permissions.');
   } finally {
     await portal.stop();
     console.log('Mock Server stopped.');
