@@ -190,7 +190,7 @@ export function saveCredentials(ssid, loginUrl, formDetails, username, password,
     action: formDetails.action
   };
 
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600, encoding: 'utf8' });
   
   // Set user-only read/write permissions on macOS/Linux
   if (process.platform !== 'win32') {
