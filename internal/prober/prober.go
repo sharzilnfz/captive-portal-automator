@@ -121,7 +121,7 @@ func ExtractPortalURL(html, baseURL string) string {
 	}
 
 	// 1. <meta http-equiv="refresh" content="0;url=...">
-	metaRe := regexp.MustCompile(`(?i)<meta[^>]+http-equiv\s*=\s*["']?refresh["']?[^>]+content\s*=\s*["'][^"']*url\s*=\s*([^"'\s>]+)`)
+	metaRe := regexp.MustCompile(`(?i)<meta[^>]+http-equiv\s*=\s*["']?refresh["']?[^>]+content\s*=\s*["'][^"']*?url\s*=\s*([^"'\s>]+)`)
 	if m := metaRe.FindStringSubmatch(html); m != nil {
 		if u, err := base.Parse(m[1]); err == nil {
 			return u.String()
@@ -129,7 +129,7 @@ func ExtractPortalURL(html, baseURL string) string {
 	}
 
 	// reversed attribute order
-	metaRe2 := regexp.MustCompile(`(?i)<meta[^>]+content\s*=\s*["'][^"']*url\s*=\s*([^"'\s>]+)[^>]*http-equiv\s*=\s*["']?refresh["']?`)
+	metaRe2 := regexp.MustCompile(`(?i)<meta[^>]+content\s*=\s*["'][^"']*?url\s*=\s*([^"'\s>]+)[^>]*http-equiv\s*=\s*["']?refresh["']?`)
 	if m := metaRe2.FindStringSubmatch(html); m != nil {
 		if u, err := base.Parse(m[1]); err == nil {
 			return u.String()
