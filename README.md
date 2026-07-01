@@ -53,18 +53,6 @@ autocap migrate             # Migrate v1 plaintext config
 autocap version             # Show version
 ```
 
-## Upgrading from v1 (Node.js)
-
-If you previously used the Node.js version, AutoCap v2 automatically migrates your saved credentials from `~/.autocap/config.json` to the OS keychain on first run.
-
-You can also migrate manually:
-
-```bash
-autocap migrate
-```
-
-After migration, you can safely remove the old Node.js files (`index.js`, `package.json`, `node_modules/`).
-
 ## Background Service
 
 ### macOS
