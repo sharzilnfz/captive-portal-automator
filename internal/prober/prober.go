@@ -105,6 +105,14 @@ func (p *Prober) probeEndpoint(ctx context.Context, ep Endpoint) ProbeResult {
 		return ProbeResult{Online: false, PortalURL: portalURL, HTML: body, FinalURL: finalURL}
 	}
 
+	// Some captive portals hijack 200 OK responses instead of redirecting.
+	// If CheckFunc failed and we got a 200 with unrecognised content, the
+	// portal is serving its own login page at our probe URL.
+	if resp.StatusCode == http.StatusOK {
+		p.logger.Info("portal hijack suspected (200 OK, unexpected body)", "url", ep.URL)
+		return ProbeResult{Online: false, PortalURL: finalURL, HTML: body, FinalURL: finalURL}
+	}
+
 	p.logger.Debug("probe inconclusive", "url", ep.URL, "status", resp.StatusCode)
 	return ProbeResult{Online: false, HTML: body, FinalURL: finalURL}
 }

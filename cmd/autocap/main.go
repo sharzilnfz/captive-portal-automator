@@ -289,7 +289,8 @@ func getStore(insecure bool, logger *slog.Logger) credential.Store {
 		return credential.NewFileStore(filepath.Join(configDir(), "credentials.json"))
 	}
 
-	store := credential.NewKeychainStore()
+	indexPath := filepath.Join(configDir(), "keyring_index.json")
+	store := credential.NewKeychainStoreWithIndex(indexPath)
 	_, err := store.Load("__autocap_keychain_test__")
 	if err != nil && err != credential.ErrNotFound {
 		logger.Info("keychain unavailable, using file store", "error", err)

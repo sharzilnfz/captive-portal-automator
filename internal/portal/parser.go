@@ -108,34 +108,31 @@ func extractFormData(formNode *html.Node, base *url.URL, index int) *FormData {
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode && (n.Data == "input" || n.Data == "select" || n.Data == "textarea") {
 			name := getAttr(n, "name")
-			if name == "" {
-				goto next
-			}
+			if name != "" {
+				inputType := strings.ToLower(getAttr(n, "type"))
+				if inputType == "" {
+					inputType = "text"
+				}
+				value := getAttr(n, "value")
+				fd.Fields[name] = value
 
-			inputType := strings.ToLower(getAttr(n, "type"))
-			if inputType == "" {
-				inputType = "text"
-			}
-			value := getAttr(n, "value")
-			fd.Fields[name] = value
-
-			switch inputType {
-			case "password":
-				fd.PasswordField = name
-			case "text", "email", "tel":
-				textInputs = append(textInputs, name)
-				lower := strings.ToLower(name)
-				for _, kw := range usernameKeywords {
-					if strings.Contains(lower, kw) {
-						if fd.UsernameField == "" {
-							fd.UsernameField = name
+				switch inputType {
+				case "password":
+					fd.PasswordField = name
+				case "text", "email", "tel":
+					textInputs = append(textInputs, name)
+					lower := strings.ToLower(name)
+					for _, kw := range usernameKeywords {
+						if strings.Contains(lower, kw) {
+							if fd.UsernameField == "" {
+								fd.UsernameField = name
+							}
+							break
 						}
-						break
 					}
 				}
 			}
 		}
-	next:
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			walk(c)
 		}
