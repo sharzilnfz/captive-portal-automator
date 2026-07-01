@@ -1,0 +1,9 @@
+# Build artifacts
+capauto
+build/
+
+# macOS
+.DS_Store
+
+# Node.js (legacy v1)
+node_modules/
