@@ -85,7 +85,12 @@ Uses `systemd` user service + optional NetworkManager dispatcher hook.
 
 ### Windows
 
-Use Task Scheduler with a "Log on" trigger or network event trigger (Event ID 10000).
+```powershell
+# Run in PowerShell as Administrator:
+powershell -ExecutionPolicy Bypass -File install/install_windows.ps1
+```
+
+Uses Windows Task Scheduler to run at user logon.
 
 ## Building from Source
 
@@ -95,6 +100,7 @@ If you don't have Go installed, our platform-specific installation scripts will 
 
 - **macOS:** Installs via Homebrew (`brew install go`)
 - **Linux:** Installs via system package manager (`apt`, `dnf`, `yum`, or `pacman`)
+- **Windows:** Installs via package managers (`winget` or `choco`), falling back to direct MSI download from go.dev if needed.
 
 ```bash
 # macOS
@@ -102,6 +108,9 @@ bash install/install_macos.sh
 
 # Linux
 bash install/install_linux.sh
+
+# Windows (Run as Administrator in PowerShell)
+powershell -ExecutionPolicy Bypass -File install/install_windows.ps1
 ```
 
 ---
