@@ -5,110 +5,258 @@ import os from 'os';
 import readline from 'readline';
 import { fileURLToPath } from 'url';
 
-// Bypass SSL verification by default for captive portal requests.
-// Captive portal controllers frequently use self-signed or local-only certificates.
+// Captive portals frequently use self-signed or local-only certificates.
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
+// ────────────────────────────────────────────────────────────────────────────
+// SSID detection
+// ────────────────────────────────────────────────────────────────────────────
 export function getSSID() {
   try {
     if (process.platform === 'darwin') {
-      // macOS SSID extraction
+      // 1. Find which device is the Wi-Fi interface (not always en0)
+      let wifiDevice = null;
       try {
-        const output = execSync('/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I').toString();
-        const match = output.match(/^\s*SSID\s*:\s*(.+)/m);
-        if (match) return match[1].trim();
-      } catch (e) {
-        // Fall back if airport command fails or isn't found
+        const ports = execSync('networksetup -listallhardwareports 2>/dev/null', { encoding: 'utf8' });
+        const m = ports.match(/Hardware Port:\s*Wi-Fi[\s\S]*?Device:\s*(\w+)/i);
+        if (m) wifiDevice = m[1].trim();
+      } catch (_) { /* ignore */ }
+
+      // 2. Query the Wi-Fi device
+      if (wifiDevice) {
+        try {
+          const out = execSync(`networksetup -getairportnetwork ${wifiDevice} 2>/dev/null`, { encoding: 'utf8' });
+          const m = out.match(/Current Wi-Fi Network\s*:\s*(.+)/i);
+          if (m) return m[1].trim();
+        } catch (_) { /* fall through */ }
       }
 
+      // 3. Try every en* interface
       try {
-        const output = execSync('networksetup -getairportnetwork en0').toString();
-        const match = output.match(/Current Wi-Fi Network\s*:\s*(.+)/i);
-        if (match) return match[1].trim();
-      } catch (e) {
-        // Fall back if networksetup fails
-      }
+        const list = execSync('ifconfig -l 2>/dev/null', { encoding: 'utf8' })
+          .trim().split(/\s+/).filter(d => /^en\d+$/.test(d));
+        for (const dev of list) {
+          try {
+            const out = execSync(`networksetup -getairportnetwork ${dev} 2>/dev/null`, { encoding: 'utf8' });
+            const m = out.match(/Current Wi-Fi Network\s*:\s*(.+)/i);
+            if (m) return m[1].trim();
+          } catch (_) { /* try next */ }
+        }
+      } catch (_) { /* ignore */ }
+
+      // 4. system_profiler — slow but reliable on modern macOS
+      try {
+        const out = execSync('system_profiler SPAirPortDataType 2>/dev/null', { encoding: 'utf8', timeout: 15000 });
+        // On Sonoma/Sequoia: "Current Network: SSID" under the active interface
+        const m = out.match(/Current Network\s*:\s*(.+)/i)
+          || out.match(/Current Network Information:[\s\S]*?\n\s+([^\n:]+):/m);
+        if (m) return m[1].trim();
+      } catch (_) { /* ignore */ }
 
       return 'Unknown_macOS_WiFi';
-    } else if (process.platform === 'win32') {
-      // Windows SSID extraction
-      const output = execSync('netsh wlan show interfaces').toString();
-      const match = output.match(/^\s*SSID\s*:\s*(.+)/m);
-      return match ? match[1].trim() : 'Unknown_Windows_WiFi';
     }
-  } catch (e) {
-    return 'Unknown_WiFi';
-  }
+
+    if (process.platform === 'win32') {
+      const out = execSync('netsh wlan show interfaces', { encoding: 'utf8' });
+      const m = out.match(/^\s*SSID\s*:\s*(.+)/m);
+      return m ? m[1].trim() : 'Unknown_Windows_WiFi';
+    }
+
+    if (process.platform === 'linux') {
+      try {
+        const out = execSync('nmcli -t -f active,ssid dev wifi 2>/dev/null', { encoding: 'utf8' });
+        const line = out.split('\n').find(l => l.startsWith('yes:'));
+        if (line) return line.substring(4).trim();
+      } catch (_) { /* ignore */ }
+      try {
+        const out = execSync('iwgetid -r 2>/dev/null', { encoding: 'utf8' });
+        if (out.trim()) return out.trim();
+      } catch (_) { /* ignore */ }
+      return 'Unknown_Linux_WiFi';
+    }
+  } catch (_) { /* ignore */ }
   return 'Unknown_WiFi';
 }
 
-export async function checkConnectivity(probeUrl = 'http://captive.apple.com/hotspot-detect.html') {
-  try {
-    const res = await fetch(probeUrl, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
-    if (res.status === 200) {
-      const text = await res.text();
-      if (/<body>\s*success\s*<\/body>/i.test(text)) {
-        return { online: true, redirectUrl: null };
+// ────────────────────────────────────────────────────────────────────────────
+// Cookie jar — many captive portals require a session cookie set by the
+// initial GET before the POST will be accepted.
+// ────────────────────────────────────────────────────────────────────────────
+function createCookieJar() {
+  const cookies = new Map();
+  return {
+    capture(res) {
+      const setCookies = res.headers.getSetCookie?.() ?? [];
+      for (const c of setCookies) {
+        const [pair] = c.split(';');
+        const eq = pair.indexOf('=');
+        if (eq > 0) {
+          cookies.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+        }
       }
+    },
+    header() {
+      if (cookies.size === 0) return undefined;
+      return Array.from(cookies.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
     }
-    if (res.status >= 300 && res.status < 400) {
-      const redirectLocation = res.headers.get('location');
-      const redirectUrl = redirectLocation ? new URL(redirectLocation, probeUrl).href : null;
-      return { online: false, redirectUrl };
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Connectivity / captive-portal detection
+// ────────────────────────────────────────────────────────────────────────────
+async function probe(probeUrl) {
+  try {
+    // redirect: 'follow' (default) — then inspect res.redirected + res.url.
+    // Using 'manual' returns an opaque-redirect response whose headers are
+    // inaccessible, which was the root cause of the original bug.
+    const res = await fetch(probeUrl, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(10000),
+    });
+    const text = await res.text();
+    const finalUrl = res.url || probeUrl;
+
+    // Apple success page: <HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>
+    const isAppleSuccess =
+      /<body>\s*success\s*<\/body>/i.test(text) && !res.redirected;
+
+    // Google / MSFT 204 probes
+    const is204 = res.status === 204;
+
+    if (isAppleSuccess || is204) {
+      return { online: true, redirectUrl: null, html: text, finalUrl };
     }
-    // If we got hijacked but returned 200 without Success text, it's the captive portal page
-    return { online: false, redirectUrl: probeUrl };
+
+    // If fetch followed a redirect, the final URL *is* the portal login page.
+    if (res.redirected && finalUrl !== probeUrl) {
+      return { online: false, redirectUrl: finalUrl, html: text, finalUrl };
+    }
+
+    // 200 at the probe URL but content isn't "Success" — the portal
+    // hijacked the response.  Try to dig the real login URL out of the HTML.
+    const extracted = extractPortalUrl(text, probeUrl);
+    if (extracted && extracted !== probeUrl) {
+      return { online: false, redirectUrl: extracted, html: text, finalUrl };
+    }
+
+    // Couldn't extract a URL — return the probe URL but mark as hijacked
+    // so the caller can try alternate probes.
+    return { online: false, redirectUrl: null, html: text, finalUrl };
   } catch (e) {
-    return { online: false, redirectUrl: null };
+    return { online: false, redirectUrl: null, html: null, finalUrl: probeUrl };
   }
 }
 
-function getAttr(attrs, attrName) {
-  const regex = new RegExp('(?:^|\\s)' + attrName + '\\s*=\\s*(?:["\']([^\'"]*)["\']|([^\\s>]+))', 'i');
-  const match = attrs.match(regex);
-  return match ? (match[1] !== undefined ? match[1] : match[2]) : null;
+export async function checkConnectivity(probeUrl = 'http://captive.apple.com/hotspot-detect.html') {
+  let r = await probe(probeUrl);
+  if (r.online) return { online: true, redirectUrl: null };
+
+  // If the first probe was hijacked but we couldn't extract a portal URL,
+  // try alternate probes — a different probe may trigger a 302 to the
+  // actual login page.
+  if (!r.redirectUrl) {
+    const alternates = [
+      'http://neverssl.com/',
+      'http://msftconnecttest.com/redirect',
+      'http://connectivitycheck.gstatic.com/generate_204',
+      'http://detectportal.firefox.com/canonical.html',
+    ];
+    for (const alt of alternates) {
+      r = await probe(alt);
+      if (r.online) return { online: true, redirectUrl: null };
+      if (r.redirectUrl) return { online: false, redirectUrl: r.redirectUrl };
+    }
+  }
+
+  return { online: false, redirectUrl: r.redirectUrl };
+}
+
+export function extractPortalUrl(html, fallbackUrl) {
+  if (!html) return null;
+  const probeHost = new URL(fallbackUrl).hostname;
+
+  // 1. <meta http-equiv="refresh" content="0;url=…">
+  const metaRefresh =
+    html.match(/<meta[^>]+http-equiv\s*=\s*["']?refresh["']?[^>]+content\s*=\s*["'][^"']*url\s*=\s*([^"'\s>]+)/i) ||
+    html.match(/<meta[^>]+content\s*=\s*["'][^"']*url\s*=\s*([^"'\s>]+)[^>]*http-equiv\s*=\s*["']?refresh["']?/i);
+  if (metaRefresh) {
+    try {
+      const u = new URL(metaRefresh[1], fallbackUrl);
+      return u.href;
+    } catch (_) { /* ignore */ }
+  }
+
+  // 2. <form action="…">
+  const formAction = html.match(/<form[^>]+action\s*=\s*["']([^"']+)["']/i);
+  if (formAction) {
+    try {
+      return new URL(formAction[1], fallbackUrl).href;
+    } catch (_) { /* ignore */ }
+  }
+
+  // 3. First <a href> pointing to a non-probe host
+  const linkRe = /<a[^>]+href\s*=\s*["']([^"'#][^"']*)["']/gi;
+  let lm;
+  while ((lm = linkRe.exec(html)) !== null) {
+    try {
+      const u = new URL(lm[1], fallbackUrl);
+      if (u.protocol.startsWith('http') && u.hostname !== probeHost) return u.href;
+    } catch (_) { /* ignore */ }
+  }
+
+  // 4. JS-style redirect: location.href = "…" or location.replace("…")
+  const jsRedirect = html.match(/location(?:\.href|\.replace)\s*=\s*["']([^"']+)["']/i);
+  if (jsRedirect) {
+    try {
+      return new URL(jsRedirect[1], fallbackUrl).href;
+    } catch (_) { /* ignore */ }
+  }
+
+  return null;   // ← was: return fallbackUrl  (that was the trap)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Form parsing helpers
+// ────────────────────────────────────────────────────────────────────────────
+function getAttr(attrs, name) {
+  const re = new RegExp('(?:^|\\s)' + name + '\\s*=\\s*(?:["\']([^\'"]*)["\']|([^\\s>]+))', 'i');
+  const m = attrs.match(re);
+  return m ? (m[1] !== undefined ? m[1] : m[2]) : null;
 }
 
 export function parseLoginForm(html, baseUrl) {
-  // Find all <form> elements on the page
   const formRegex = /<form([^>]*?)>([\s\S]*?)<\/form>/gi;
-  const formMatches = [];
-  let formMatch;
-  while ((formMatch = formRegex.exec(html)) !== null) {
-    formMatches.push(formMatch);
-  }
+  const forms = [];
+  let fm;
+  while ((fm = formRegex.exec(html)) !== null) forms.push(fm);
 
-  if (formMatches.length === 0) {
+  if (forms.length === 0) {
     throw new Error('No form element found on the login page');
   }
 
-  // Parse each form
-  const parsedForms = formMatches.map(match => {
-    const formAttributes = match[1];
+  const parsed = forms.map(match => {
+    const formAttrs = match[1];
     const formContent = match[2];
 
-    // Extract action and method using getAttr
-    let action = getAttr(formAttributes, 'action') || '';
-    const method = (getAttr(formAttributes, 'method') || 'POST').toUpperCase();
+    let action = getAttr(formAttrs, 'action') || '';
+    const method = (getAttr(formAttrs, 'method') || 'POST').toUpperCase();
 
-    // Resolve relative action URLs
-    if (action && !action.startsWith('http')) {
-      const url = new URL(action, baseUrl);
-      action = url.href;
+    if (action && !/^https?:/i.test(action)) {
+      action = new URL(action, baseUrl).href;
     } else if (!action) {
       action = baseUrl;
     }
 
-    // Parse all <input> tags inside the form
-    const inputRegex = /<input([^>]*?)>/gi;
+    const inputRe = /<input([^>]*?)\/?>/gi;
     const fields = {};
     let usernameField = '';
     let passwordField = '';
-    const textInputNames = [];
+    const textInputs = [];
 
-    let inputMatch;
-    while ((inputMatch = inputRegex.exec(formContent)) !== null) {
-      const attrs = inputMatch[1];
+    let im;
+    while ((im = inputRe.exec(formContent)) !== null) {
+      const attrs = im[1];
       const name = getAttr(attrs, 'name');
       if (!name) continue;
 
@@ -120,69 +268,52 @@ export function parseLoginForm(html, baseUrl) {
       if (type === 'password') {
         passwordField = name;
       } else if (type === 'text' || type === 'email') {
-        textInputNames.push(name);
-
-        const nameLower = name.toLowerCase();
+        textInputs.push(name);
+        const lower = name.toLowerCase();
         if (
-          nameLower.includes('user') ||
-          nameLower.includes('login') ||
-          nameLower.includes('id') ||
-          nameLower.includes('member') ||
-          nameLower.includes('email') ||
-          nameLower.includes('phone') ||
-          nameLower.includes('mobile') ||
-          nameLower.includes('telephone')
+          lower.includes('user') || lower.includes('login') ||
+          lower.includes('id')    || lower.includes('member') ||
+          lower.includes('email') || lower.includes('phone') ||
+          lower.includes('mobile')|| lower.includes('telephone') ||
+          lower.includes('account')
         ) {
-          if (!usernameField) {
-            usernameField = name;
-          }
+          if (!usernameField) usernameField = name;
         }
       }
     }
 
-    // Fallback if username field not matched by keywords
     if (!usernameField && passwordField) {
-      const candidates = textInputNames.filter(name => name !== passwordField);
-      if (candidates.length > 0) {
-        usernameField = candidates[0];
-      }
+      const cands = textInputs.filter(n => n !== passwordField);
+      if (cands.length > 0) usernameField = cands[0];
     }
 
     return { action, method, fields, usernameField, passwordField };
   });
 
-  // Prioritize forms containing a password input
-  const loginForm = parsedForms.find(f => f.passwordField);
-  if (loginForm) {
-    return loginForm;
-  }
-
-  // Fallback to the first form on the page
-  return parsedForms[0];
+  return parsed.find(f => f.passwordField) || parsed[0];
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Config persistence
+// ────────────────────────────────────────────────────────────────────────────
 export function getConfigPath() {
-  const home = os.homedir();
-  return path.join(home, '.capauto', 'config.json');
+  return path.join(os.homedir(), '.capauto', 'config.json');
 }
 
 export function loadConfig(configPath = getConfigPath()) {
   try {
     if (fs.existsSync(configPath)) {
-      const data = fs.readFileSync(configPath, 'utf8');
-      return JSON.parse(data);
+      return JSON.parse(fs.readFileSync(configPath, 'utf8'));
     }
   } catch (e) {
-    console.warn(`[Warning] Failed to parse config file at "${configPath}":`, e.message);
+    console.warn(`[Warning] Failed to parse config at "${configPath}":`, e.message);
   }
   return {};
 }
 
 export function saveCredentials(ssid, loginUrl, formDetails, username, password, configPath = getConfigPath()) {
   const dir = path.dirname(configPath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  }
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 
   const config = loadConfig(configPath);
   config[ssid] = {
@@ -193,85 +324,84 @@ export function saveCredentials(ssid, loginUrl, formDetails, username, password,
     passwordField: formDetails.passwordField,
     staticFields: formDetails.fields,
     action: formDetails.action,
-    method: formDetails.method || 'POST'
+    method: formDetails.method || 'POST',
   };
 
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600, encoding: 'utf8' });
-  
-  // Set user-only read/write permissions on macOS/Linux
   if (process.platform !== 'win32') {
-    try {
-      fs.chmodSync(configPath, 0o600);
-    } catch (e) {
-      // Fallback
-    }
+    try { fs.chmodSync(configPath, 0o600); } catch (_) { /* ignore */ }
   }
 }
 
 export function promptUser(query) {
   if (!process.stdin.isTTY) {
-    return Promise.reject(new Error('Terminal is non-interactive, cannot prompt for credentials in background mode'));
+    return Promise.reject(new Error('Terminal is non-interactive — cannot prompt for credentials'));
   }
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-  return new Promise((resolve) => rl.question(query, (ans) => {
-    rl.close();
-    resolve(ans);
-  }));
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise(resolve =>
+    rl.question(query, ans => { rl.close(); resolve(ans); })
+  );
 }
 
-export async function submitLogin(action, method, payload) {
-  const normalizedMethod = (method || 'POST').toUpperCase();
+// ────────────────────────────────────────────────────────────────────────────
+// HTTP submission (with cookie support)
+// ────────────────────────────────────────────────────────────────────────────
+export async function submitLogin(action, method, payload, cookieJar) {
+  const m = (method || 'POST').toUpperCase();
   let targetUrl = action;
   const options = {
-    method: normalizedMethod,
+    method: m,
     headers: {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      'User-Agent':
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     },
-    signal: AbortSignal.timeout(10000)
+    redirect: 'follow',
+    signal: AbortSignal.timeout(15000),
   };
 
-  if (normalizedMethod === 'GET') {
-    const urlObj = new URL(action);
+  const cookieHeader = cookieJar?.header();
+  if (cookieHeader) options.headers['Cookie'] = cookieHeader;
+
+  if (m === 'GET') {
+    const u = new URL(action);
     const params = new URLSearchParams(payload);
-    for (const [key, value] of params) {
-      urlObj.searchParams.set(key, value);
-    }
-    targetUrl = urlObj.href;
-  } else if (normalizedMethod === 'POST') {
+    for (const [k, v] of params) u.searchParams.set(k, v);
+    targetUrl = u.href;
+  } else if (m === 'POST') {
     options.headers['Content-Type'] = 'application/x-www-form-urlencoded';
     options.body = new URLSearchParams(payload).toString();
   }
 
   const res = await fetch(targetUrl, options);
+  if (cookieJar) cookieJar.capture(res);
   return res;
 }
 
-export async function runAutomator(configPath = getConfigPath(), probeUrl = 'http://captive.apple.com/hotspot-detect.html') {
+// ────────────────────────────────────────────────────────────────────────────
+// Main orchestrator
+// ────────────────────────────────────────────────────────────────────────────
+export async function runAutomator(
+  configPath = getConfigPath(),
+  probeUrl = 'http://captive.apple.com/hotspot-detect.html'
+) {
   let ssid = process.env.CAPAUTO_TEST_SSID;
   if (!ssid) {
-    try {
-      ssid = getSSID();
-    } catch (err) {
-      ssid = 'Unknown_WiFi';
-    }
+    try { ssid = getSSID(); } catch (_) { ssid = 'Unknown_WiFi'; }
   }
   console.log(`[${new Date().toISOString()}] Checking network connection on Wi-Fi: "${ssid}"...`);
 
+  // --- 1. Are we online / behind a captive portal? ------------------------
   let status = await checkConnectivity(probeUrl);
   if (status.online) {
     console.log('Already online. Exiting.');
     return true;
   }
 
-  // If not online and no redirect URL found immediately, retry up to 3 times with a 2-second delay.
-  // This gives the network interface time to stabilize and receive a DHCP lease when triggered by network changes.
+  // Retry a few times in case the interface is still coming up.
   let attempts = 1;
   while (!status.online && !status.redirectUrl && attempts < 3) {
-    console.log(`Connection offline but no captive portal detected (attempt ${attempts}). Retrying in 2 seconds...`);
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    console.log(`Offline but no portal detected yet (attempt ${attempts}). Retrying in 2 s…`);
+    await new Promise(r => setTimeout(r, 2000));
     status = await checkConnectivity(probeUrl);
     attempts++;
   }
@@ -280,111 +410,132 @@ export async function runAutomator(configPath = getConfigPath(), probeUrl = 'htt
     console.log('Already online. Exiting.');
     return true;
   }
-
   if (!status.redirectUrl) {
-    console.log('Not online, and no captive portal redirection detected. Exiting.');
+    console.log('Not online, and no captive-portal redirection detected. Exiting.');
     return false;
   }
 
-  console.log(`Captive portal detected! Redirected to: ${status.redirectUrl}`);
+  console.log(`Captive portal detected! Login page: ${status.redirectUrl}`);
 
-  // Load credentials
+  // --- 2. Fetch the *actual* login page (always, never trust saved URL) --
+  const cookieJar = createCookieJar();
+  let html = '';
+  let finalLoginUrl = status.redirectUrl;
+  try {
+    const pageRes = await fetch(status.redirectUrl, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(15000),
+    });
+    cookieJar.capture(pageRes);
+    html = await pageRes.text();
+    finalLoginUrl = pageRes.url || status.redirectUrl;
+  } catch (err) {
+    console.error('Failed to fetch captive-portal login page:', err.message);
+    return false;
+  }
+
+  if (process.argv.includes('--debug')) {
+    console.log('\n--- DEBUG: Portal page HTML (first 2000 chars) ---');
+    console.log(html.substring(0, 2000));
+    console.log('--- END DEBUG ---\n');
+  }
+
+  // --- 3. Parse the form (always re-parse; fall back to saved fields) ----
   const config = loadConfig(configPath);
-  let credentials = config[ssid];
+  const saved = config[ssid];
 
-  let username, password;
   let formDetails;
-
-  if (!credentials) {
-    console.log(`No saved credentials found for SSID: "${ssid}". Initiating first-time setup...`);
-    console.log('Fetching login page to analyze form...');
-    
-    let html = '';
-    try {
-      const pageRes = await fetch(status.redirectUrl, { signal: AbortSignal.timeout(10000) });
-      html = await pageRes.text();
-    } catch (err) {
-      console.error('Failed to fetch captive portal login page:', err.message);
-      return false;
-    }
-
-    try {
-      formDetails = parseLoginForm(html, status.redirectUrl);
-    } catch (err) {
-      console.error('Failed to parse login form automatically:', err.message);
-      console.log('Please enter credentials, we will try to submit standard fields.');
+  try {
+    formDetails = parseLoginForm(html, finalLoginUrl);
+    console.log(`Found form action: "${formDetails.action}"`);
+  } catch (err) {
+    console.error('Failed to parse login form automatically:', err.message);
+    if (saved) {
+      console.log('Falling back to previously saved form details.');
       formDetails = {
-        action: status.redirectUrl,
+        action: saved.action,
+        method: saved.method,
+        fields: saved.staticFields || {},
+        usernameField: saved.usernameField,
+        passwordField: saved.passwordField,
+      };
+    } else {
+      console.log('Using standard username/password fields. Run with --debug to inspect the page.');
+      formDetails = {
+        action: finalLoginUrl,
         method: 'POST',
         fields: {},
         usernameField: 'username',
-        passwordField: 'password'
+        passwordField: 'password',
       };
     }
+  }
 
-    console.log(`Detected username field: "${formDetails.usernameField}"`);
-    console.log(`Detected password field: "${formDetails.passwordField}"`);
+  console.log(`Detected username field: "${formDetails.usernameField}"`);
+  console.log(`Detected password field: "${formDetails.passwordField}"`);
 
+  // --- 4. Obtain credentials ---------------------------------------------
+  let username, password;
+  if (saved && saved.username && saved.password) {
+    username = saved.username;
+    password = saved.password;
+    console.log('Using saved credentials.');
+  } else {
+    if (!saved) console.log(`No saved credentials for SSID: "${ssid}". First-time setup…`);
     username = await promptUser('Enter your Wi-Fi username/ID: ');
     password = await promptUser('Enter your Wi-Fi password: ');
-
     if (!username || !password) {
       console.error('Credentials cannot be empty. Aborting.');
       return false;
     }
-
-    saveCredentials(ssid, status.redirectUrl, formDetails, username, password, configPath);
-    console.log(`Credentials saved for SSID: "${ssid}"`);
-    
-    // Reload credentials
-    credentials = loadConfig(configPath)[ssid];
   }
 
-  // Prepare payload
+  // Persist / refresh saved credentials so future runs are seamless.
+  saveCredentials(ssid, finalLoginUrl, formDetails, username, password, configPath);
+  console.log(`Credentials saved for SSID: "${ssid}"`);
+
+  // --- 5. Submit the login ------------------------------------------------
   const payload = {
-    ...credentials.staticFields,
-    [credentials.usernameField]: credentials.username,
-    [credentials.passwordField]: credentials.password
+    ...formDetails.fields,
+    [formDetails.usernameField]: username,
+    [formDetails.passwordField]: password,
   };
 
-  console.log(`Submitting login request to: ${credentials.action}...`);
+  console.log(`Submitting login request to: ${formDetails.action}…`);
   try {
-    await submitLogin(credentials.action, credentials.method || 'POST', payload);
-    console.log('Form submitted. Verifying internet connectivity...');
-    
-    // Wait 2 seconds for portal to register
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await submitLogin(formDetails.action, formDetails.method, payload, cookieJar);
+    console.log('Form submitted. Verifying internet connectivity…');
 
-    const doubleCheck = await checkConnectivity(probeUrl);
-    if (doubleCheck.online) {
+    // Give the portal a moment to register the session.
+    await new Promise(r => setTimeout(r, 2500));
+
+    const recheck = await checkConnectivity(probeUrl);
+    if (recheck.online) {
       console.log('Success! Internet connection established.');
       return true;
-    } else {
-      console.error('Form submitted but still redirected. Login might have failed or needs verification.');
-      return false;
     }
+    console.error('Still redirected after login. Login may have failed or the portal needs extra steps.');
+    console.error('Tip: run with --debug to inspect the portal HTML.');
+    return false;
   } catch (err) {
     console.error('Error submitting login form:', err.message);
     return false;
   }
 }
 
-// Self-execute if run directly (not imported by test)
-let nodePath = null;
-try {
-  nodePath = process.argv[1] ? fs.realpathSync(process.argv[1]) : null;
-} catch (e) {
-  // Ignore realpath exceptions for virtual/non-existent paths
-}
-const currentPath = fileURLToPath(import.meta.url);
-const isMain = nodePath === currentPath || (nodePath && nodePath === fs.realpathSync(currentPath));
+// ────────────────────────────────────────────────────────────────────────────
+// Self-execute when run directly
+// ────────────────────────────────────────────────────────────────────────────
+const isMain = (() => {
+  try {
+    return process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch (_) {
+    return false;
+  }
+})();
 
 if (isMain) {
-  runAutomator().then(success => {
-    process.exit(success ? 0 : 1);
-  }).catch(err => {
-    console.error('Fatal execution error:', err);
-    process.exit(1);
-  });
+  runAutomator()
+    .then(ok => process.exit(ok ? 0 : 1))
+    .catch(err => { console.error('Fatal execution error:', err); process.exit(1); });
 }
-
