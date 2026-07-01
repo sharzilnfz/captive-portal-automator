@@ -12,10 +12,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sharzilnafis/capauto/internal/auth"
-	"github.com/sharzilnafis/capauto/internal/credential"
-	"github.com/sharzilnafis/capauto/internal/portal"
-	"github.com/sharzilnafis/capauto/internal/prober"
+	"github.com/sharzilnafis/autocap/internal/auth"
+	"github.com/sharzilnafis/autocap/internal/credential"
+	"github.com/sharzilnafis/autocap/internal/portal"
+	"github.com/sharzilnafis/autocap/internal/prober"
 )
 
 // mockPortal simulates a captive portal for integration testing.

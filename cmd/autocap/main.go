@@ -14,19 +14,19 @@ import (
 	"strings"
 	"time"
 
-	capautoLog "github.com/sharzilnafis/capauto/internal/log"
-	"github.com/sharzilnafis/capauto/internal/auth"
-	"github.com/sharzilnafis/capauto/internal/credential"
-	"github.com/sharzilnafis/capauto/internal/network"
-	"github.com/sharzilnafis/capauto/internal/portal"
-	"github.com/sharzilnafis/capauto/internal/prober"
+	autocapLog "github.com/sharzilnafis/autocap/internal/log"
+	"github.com/sharzilnafis/autocap/internal/auth"
+	"github.com/sharzilnafis/autocap/internal/credential"
+	"github.com/sharzilnafis/autocap/internal/network"
+	"github.com/sharzilnafis/autocap/internal/portal"
+	"github.com/sharzilnafis/autocap/internal/prober"
 )
 
 const version = "2.0.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "capauto: %v\n", err)
+		fmt.Fprintf(os.Stderr, "autocap: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -45,7 +45,7 @@ func run(args []string) error {
 		case "migrate":
 			return handleMigrate()
 		case "version":
-			fmt.Printf("capauto v%s\n", version)
+			fmt.Printf("autocap v%s\n", version)
 			return nil
 		case "help", "--help", "-h":
 			printUsage()
@@ -57,7 +57,7 @@ func run(args []string) error {
 }
 
 func handleAutomate(args []string) error {
-	fs := flag.NewFlagSet("capauto", flag.ExitOnError)
+	fs := flag.NewFlagSet("autocap", flag.ExitOnError)
 	debug := fs.Bool("debug", false, "Enable debug logging")
 	dryRun := fs.Bool("dry-run", false, "Detect portal but don't submit")
 	insecure := fs.Bool("insecure-store", false, "Use plaintext credential storage")
@@ -67,10 +67,10 @@ func handleAutomate(args []string) error {
 	if *debug {
 		level = slog.LevelDebug
 	}
-	logger := capautoLog.New(level, "text", os.Stderr)
+	logger := autocapLog.New(level, "text", os.Stderr)
 
 	// Detect SSID
-	ssid := os.Getenv("CAPAUTO_TEST_SSID")
+	ssid := os.Getenv("AUTOCAP_TEST_SSID")
 	if ssid == "" {
 		var err error
 		ssid, err = network.GetSSID()
@@ -194,11 +194,11 @@ func handleAutomate(args []string) error {
 
 func handleCreds(args []string) error {
 	if len(args) == 0 {
-		fmt.Println("Usage: capauto creds <list|add|remove> [SSID]")
+		fmt.Println("Usage: autocap creds <list|add|remove> [SSID]")
 		return nil
 	}
 
-	logger := capautoLog.New(slog.LevelInfo, "text", os.Stderr)
+	logger := autocapLog.New(slog.LevelInfo, "text", os.Stderr)
 	store := getStore(false, logger)
 
 	switch args[0] {
@@ -222,7 +222,7 @@ func handleCreds(args []string) error {
 
 	case "add":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: capauto creds add <SSID>")
+			return fmt.Errorf("usage: autocap creds add <SSID>")
 		}
 		creds, err := promptForCredentials(args[1], nil)
 		if err != nil {
@@ -235,7 +235,7 @@ func handleCreds(args []string) error {
 
 	case "remove":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: capauto creds remove <SSID>")
+			return fmt.Errorf("usage: autocap creds remove <SSID>")
 		}
 		if err := store.Delete(args[1]); err != nil {
 			return fmt.Errorf("delete credentials: %w", err)
@@ -249,19 +249,19 @@ func handleCreds(args []string) error {
 }
 
 func handleInstall() error {
-	fmt.Println("capauto install — see README.md for platform-specific instructions")
+	fmt.Println("autocap install — see README.md for platform-specific instructions")
 	fmt.Println("  macOS:  bash install/install_macos.sh")
 	fmt.Println("  Linux:  bash install/install_linux.sh")
 	return nil
 }
 
 func handleUninstall() error {
-	fmt.Println("capauto uninstall — see README.md for platform-specific instructions")
+	fmt.Println("autocap uninstall — see README.md for platform-specific instructions")
 	return nil
 }
 
 func handleStatus() error {
-	fmt.Printf("capauto v%s\n", version)
+	fmt.Printf("autocap v%s\n", version)
 	ssid, err := network.GetSSID()
 	if err != nil {
 		fmt.Printf("Wi-Fi: not connected (%v)\n", err)
@@ -272,7 +272,7 @@ func handleStatus() error {
 }
 
 func handleMigrate() error {
-	logger := capautoLog.New(slog.LevelInfo, "text", os.Stderr)
+	logger := autocapLog.New(slog.LevelInfo, "text", os.Stderr)
 	store := getStore(false, logger)
 	v1Path := filepath.Join(configDir(), "config.json")
 	return credential.MigrateV1Config(v1Path, store, logger)
@@ -280,7 +280,7 @@ func handleMigrate() error {
 
 func configDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".capauto")
+	return filepath.Join(home, ".autocap")
 }
 
 func getStore(insecure bool, logger *slog.Logger) credential.Store {
@@ -290,7 +290,7 @@ func getStore(insecure bool, logger *slog.Logger) credential.Store {
 	}
 
 	store := credential.NewKeychainStore()
-	_, err := store.Load("__capauto_keychain_test__")
+	_, err := store.Load("__autocap_keychain_test__")
 	if err != nil && err != credential.ErrNotFound {
 		logger.Info("keychain unavailable, using file store", "error", err)
 		return credential.NewFileStore(filepath.Join(configDir(), "credentials.json"))
@@ -300,7 +300,7 @@ func getStore(insecure bool, logger *slog.Logger) credential.Store {
 
 func promptForCredentials(ssid string, form *portal.FormData) (*credential.Credentials, error) {
 	if !isTerminal() {
-		return nil, fmt.Errorf("non-interactive terminal — cannot prompt (use 'capauto creds add %s')", ssid)
+		return nil, fmt.Errorf("non-interactive terminal — cannot prompt (use 'autocap creds add %s')", ssid)
 	}
 
 	reader := bufio.NewReader(os.Stdin)
@@ -345,21 +345,21 @@ func isTerminal() bool {
 }
 
 func printUsage() {
-	fmt.Println(`CapAuto v` + version + ` — Captive Portal Automator
+	fmt.Println(`AutoCap v` + version + ` — Captive Portal Automator
 
 Usage:
-  capauto                     Run once: detect portal → login
-  capauto --debug             Verbose output with portal HTML dump
-  capauto --dry-run           Detect portal but don't submit
-  capauto --insecure-store    Use plaintext credential storage
+  autocap                     Run once: detect portal → login
+  autocap --debug             Verbose output with portal HTML dump
+  autocap --dry-run           Detect portal but don't submit
+  autocap --insecure-store    Use plaintext credential storage
 
-  capauto creds list          Show saved SSIDs
-  capauto creds add <SSID>    Add credentials for a network
-  capauto creds remove <SSID> Remove credentials
+  autocap creds list          Show saved SSIDs
+  autocap creds add <SSID>    Add credentials for a network
+  autocap creds remove <SSID> Remove credentials
 
-  capauto install             Install as background service
-  capauto uninstall           Remove background service
-  capauto status              Show Wi-Fi status
-  capauto migrate             Migrate v1 plaintext config
-  capauto version             Show version`)
+  autocap install             Install as background service
+  autocap uninstall           Remove background service
+  autocap status              Show Wi-Fi status
+  autocap migrate             Migrate v1 plaintext config
+  autocap version             Show version`)
 }

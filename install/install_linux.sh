@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BINARY="capauto"
+BINARY="autocap"
 INSTALL_DIR="/usr/local/bin"
 SERVICE_DIR="$HOME/.config/systemd/user"
 DISPATCHER_DIR="/etc/NetworkManager/dispatcher.d"
 
-echo "Installing CapAuto..."
+echo "Installing AutoCap..."
 
 # Build if binary doesn't exist
 if [ ! -f "${BINARY}" ]; then
     echo "Building..."
-    go build -o "${BINARY}" ./cmd/capauto
+    go build -o "${BINARY}" ./cmd/autocap
 fi
 
 # Install binary
@@ -22,22 +22,22 @@ sudo chmod 755 "${INSTALL_DIR}/${BINARY}"
 # Install systemd unit
 echo "Installing systemd user service..."
 mkdir -p "${SERVICE_DIR}"
-cp "$(dirname "$0")/capauto.service" "${SERVICE_DIR}/capauto.service"
+cp "$(dirname "$0")/autocap.service" "${SERVICE_DIR}/autocap.service"
 systemctl --user daemon-reload
-systemctl --user enable capauto.service
+systemctl --user enable autocap.service
 
 # Install NetworkManager dispatcher (optional)
 if [ -d "${DISPATCHER_DIR}" ]; then
     echo "Installing NetworkManager dispatcher..."
-    sudo tee "${DISPATCHER_DIR}/99-capauto" > /dev/null << 'EOF'
+    sudo tee "${DISPATCHER_DIR}/99-autocap" > /dev/null << 'EOF'
 #!/bin/bash
 if [ "$2" = "up" ]; then
-    /usr/local/bin/capauto &
+    /usr/local/bin/autocap &
 fi
 EOF
-    sudo chmod 755 "${DISPATCHER_DIR}/99-capauto"
+    sudo chmod 755 "${DISPATCHER_DIR}/99-autocap"
 fi
 
-echo "Done! CapAuto is now installed."
-echo "To run manually: capauto"
-echo "To uninstall: capauto uninstall"
+echo "Done! AutoCap is now installed."
+echo "To run manually: autocap"
+echo "To uninstall: autocap uninstall"

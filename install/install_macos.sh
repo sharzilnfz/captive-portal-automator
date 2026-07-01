@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BINARY="capauto"
+BINARY="autocap"
 INSTALL_DIR="/usr/local/bin"
-PLIST_NAME="com.sharzil.capauto.plist"
+PLIST_NAME="com.sharzil.autocap.plist"
 PLIST_SRC="$(dirname "$0")/${PLIST_NAME}"
 PLIST_DST="$HOME/Library/LaunchAgents/${PLIST_NAME}"
 
-echo "Installing CapAuto..."
+echo "Installing AutoCap..."
 
 # Build if binary doesn't exist
 if [ ! -f "${BINARY}" ]; then
     echo "Building..."
-    go build -o "${BINARY}" ./cmd/capauto
+    go build -o "${BINARY}" ./cmd/autocap
 fi
 
 # Install binary
@@ -31,6 +31,6 @@ launchctl bootout "gui/$(id -u)" "${PLIST_DST}" 2>/dev/null || true
 # Load
 launchctl bootstrap "gui/$(id -u)" "${PLIST_DST}"
 
-echo "Done! CapAuto is now running in the background."
-echo "Logs: /tmp/capauto.log"
-echo "To uninstall: capauto uninstall"
+echo "Done! AutoCap is now running in the background."
+echo "Logs: /tmp/autocap.log"
+echo "To uninstall: autocap uninstall"

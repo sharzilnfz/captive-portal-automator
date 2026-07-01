@@ -31,7 +31,7 @@ type Store interface {
 }
 
 // ServiceName is the keychain service identifier.
-const ServiceName = "capauto"
+const ServiceName = "autocap"
 
 // marshalCreds serializes credentials to JSON for storage.
 func marshalCreds(c *Credentials) (string, error) {

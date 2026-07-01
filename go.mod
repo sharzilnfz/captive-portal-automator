@@ -1,4 +1,4 @@
-module github.com/sharzilnafis/capauto
+module github.com/sharzilnafis/autocap
 
 go 1.26.4
 

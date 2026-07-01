@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sharzilnafis/capauto/internal/credential"
-	"github.com/sharzilnafis/capauto/internal/portal"
-	"github.com/sharzilnafis/capauto/internal/prober"
+	"github.com/sharzilnafis/autocap/internal/credential"
+	"github.com/sharzilnafis/autocap/internal/portal"
+	"github.com/sharzilnafis/autocap/internal/prober"
 )
 
 // Submitter handles login form submission and verification.

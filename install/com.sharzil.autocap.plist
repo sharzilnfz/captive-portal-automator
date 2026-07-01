@@ -3,11 +3,10 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.sharzil.capauto</string>
+    <string>com.sharzil.autocap</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/node</string>
-        <string>/Users/sharzilnafis/Desktop/Project/captive-portal-automator/index.js</string>
+        <string>/usr/local/bin/autocap</string>
     </array>
     <key>WatchPaths</key>
     <array>
@@ -17,8 +16,8 @@
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/sharzilnafis/Desktop/Project/captive-portal-automator/capauto.log</string>
+    <string>/tmp/autocap.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/sharzilnafis/Desktop/Project/captive-portal-automator/capauto.err</string>
+    <string>/tmp/autocap.err</string>
 </dict>
 </plist>
