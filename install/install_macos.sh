@@ -9,6 +9,18 @@ PLIST_DST="$HOME/Library/LaunchAgents/${PLIST_NAME}"
 
 echo "Installing AutoCap..."
 
+# Check if Go is installed
+if ! command -v go &> /dev/null; then
+    echo "Go is not installed. Attempting to install Go..."
+    if command -v brew &> /dev/null; then
+        echo "Installing Go via Homebrew..."
+        brew install go
+    else
+        echo "Error: Homebrew is not installed. Please install Go manually from https://go.dev/doc/install"
+        exit 1
+    fi
+fi
+
 # Build if binary doesn't exist
 if [ ! -f "${BINARY}" ]; then
     echo "Building..."

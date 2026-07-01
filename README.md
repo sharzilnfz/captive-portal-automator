@@ -89,9 +89,69 @@ Use Task Scheduler with a "Log on" trigger or network event trigger (Event ID 10
 
 ## Building from Source
 
-```bash
-# Requirements: Go 1.21+
+### ⚡ Automated Installation (Recommended)
 
+If you don't have Go installed, our platform-specific installation scripts will **automatically** attempt to detect, download, and install the correct Go version for you:
+
+- **macOS:** Installs via Homebrew (`brew install go`)
+- **Linux:** Installs via system package manager (`apt`, `dnf`, `yum`, or `pacman`)
+
+```bash
+# macOS
+bash install/install_macos.sh
+
+# Linux
+bash install/install_linux.sh
+```
+
+---
+
+### 🛠️ Manual Go Installation Guide
+
+If you prefer to install Go manually, here is how to get **Go 1.21+** set up:
+
+#### 🍎 macOS
+```bash
+# Option 1: Via Homebrew
+brew install go
+
+# Option 2: Installer package (.pkg)
+# Download from: https://go.dev/dl/
+```
+
+#### 🐧 Linux
+```bash
+# Ubuntu / Debian
+sudo apt-get update && sudo apt-get install -y golang-go
+
+# Fedora / RHEL
+sudo dnf install -y golang
+
+# Arch Linux
+sudo pacman -S --noconfirm go
+```
+
+#### 🪟 Windows
+```bash
+# Option 1: Via winget
+winget install GoLang.Go
+
+# Option 2: MSI installer
+# Download and run the installer from: https://go.dev/dl/
+```
+
+Verify Go is installed correctly by running:
+```bash
+go version
+```
+
+---
+
+### 📦 Manual Compilation & Testing
+
+Once Go is installed, compile and test using the Makefile:
+
+```bash
 # Build for current platform
 make build
 

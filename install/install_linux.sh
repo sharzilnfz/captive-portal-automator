@@ -8,6 +8,27 @@ DISPATCHER_DIR="/etc/NetworkManager/dispatcher.d"
 
 echo "Installing AutoCap..."
 
+# Check if Go is installed
+if ! command -v go &> /dev/null; then
+    echo "Go is not installed. Attempting to install Go..."
+    if command -v apt-get &> /dev/null; then
+        echo "Installing Go via apt..."
+        sudo apt-get update && sudo apt-get install -y golang-go
+    elif command -v dnf &> /dev/null; then
+        echo "Installing Go via dnf..."
+        sudo dnf install -y golang
+    elif command -v yum &> /dev/null; then
+        echo "Installing Go via yum..."
+        sudo yum install -y golang
+    elif command -v pacman &> /dev/null; then
+        echo "Installing Go via pacman..."
+        sudo pacman -S --noconfirm go
+    else
+        echo "Error: Package manager not recognized. Please install Go manually from https://go.dev/doc/install"
+        exit 1
+    fi
+fi
+
 # Build if binary doesn't exist
 if [ ! -f "${BINARY}" ]; then
     echo "Building..."
