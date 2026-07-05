@@ -2,13 +2,17 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,15 +126,28 @@ func handleAutomate(args []string) error {
 	defer pageResp.Body.Close()
 	finalLoginURL := pageResp.Request.URL.String()
 
-	if *debug {
-		logger.Debug("portal page fetched", "finalURL", finalLoginURL, "status", pageResp.StatusCode)
+	// Buffer body so it can be both logged and parsed.
+	bodyBytes, err := io.ReadAll(pageResp.Body)
+	if err != nil {
+		return fmt.Errorf("read portal body: %w", err)
 	}
 
-	// Parse the login form
-	formData, err := portal.ParseLoginForm(pageResp.Body, finalLoginURL)
+	if *debug {
+		logger.Debug("portal page fetched", "finalURL", finalLoginURL, "status", pageResp.StatusCode)
+		snip := string(bodyBytes)
+		if len(snip) > 2000 {
+			snip = snip[:2000]
+		}
+		logger.Debug("portal HTML", "body", snip)
+	}
+
+	// Parse the login form, following one level of redirect if needed.
+	var formData *portal.FormData
+	formData, _, err = parseFormWithFollowRedirect(ctx, client, bodyBytes, finalLoginURL, logger, *debug)
 	if err != nil {
 		return fmt.Errorf("parse login form: %w", err)
 	}
+
 
 	logger.Info("form parsed",
 		"action", formData.Action,
@@ -144,33 +161,44 @@ func handleAutomate(args []string) error {
 		return nil
 	}
 
-	// Load or prompt for credentials
-	store := getStore(*insecure, logger)
+	// Load or prompt for credentials (skip for click-through portals)
+	var creds *credential.Credentials
+	isClickThrough := formData.UsernameField == "" && formData.PasswordField == ""
 
-	// Try to migrate v1 config
-	v1Path := filepath.Join(configDir(), "config.json")
-	credential.MigrateV1Config(v1Path, store, logger)
-
-	creds, err := store.Load(ssid)
-	if err != nil {
-		logger.Info("no saved credentials, prompting", "ssid", ssid)
-		creds, err = promptForCredentials(ssid, formData)
-		if err != nil {
-			return fmt.Errorf("prompt credentials: %w", err)
+	if isClickThrough {
+		logger.Info("click-through portal detected (no credentials required)")
+		creds = &credential.Credentials{
+			SSID: ssid,
 		}
 	} else {
-		logger.Info("using saved credentials", "ssid", ssid)
-	}
+		store := getStore(*insecure, logger)
 
-	// Update credential field info from current form parse
-	creds.UsernameField = formData.UsernameField
-	creds.PasswordField = formData.PasswordField
-	creds.FormAction = formData.Action
-	creds.FormMethod = formData.Method
-	creds.StaticFields = formData.Fields
+		// Try to migrate v1 config
+		v1Path := filepath.Join(configDir(), "config.json")
+		credential.MigrateV1Config(v1Path, store, logger)
 
-	if err := store.Save(creds); err != nil {
-		logger.Warn("failed to save credentials", "error", err)
+		var err error
+		creds, err = store.Load(ssid)
+		if err != nil {
+			logger.Info("no saved credentials, prompting", "ssid", ssid)
+			creds, err = promptForCredentials(ssid, formData)
+			if err != nil {
+				return fmt.Errorf("prompt credentials: %w", err)
+			}
+		} else {
+			logger.Info("using saved credentials", "ssid", ssid)
+		}
+
+		// Update credential field info from current form parse
+		creds.UsernameField = formData.UsernameField
+		creds.PasswordField = formData.PasswordField
+		creds.FormAction = formData.Action
+		creds.FormMethod = formData.Method
+		creds.StaticFields = formData.Fields
+
+		if err := store.Save(creds); err != nil {
+			logger.Warn("failed to save credentials", "error", err)
+		}
 	}
 
 	// Submit login
@@ -191,6 +219,207 @@ func handleAutomate(args []string) error {
 
 	return fmt.Errorf("still offline after login — portal may need extra steps (use --debug to inspect)")
 }
+
+// parseFormWithFollowRedirect parses a login form from bodyBytes with baseURL.
+// Resolution order:
+//  1. Standard ParseLoginForm (static <form> element).
+//  2. If ErrRedirect, fetch that URL and retry once.
+//  3. If the form was synthesised from id-based inputs (JS-driven portal),
+//     try to resolve the real action URL from external JS scripts;
+//     for Ruijie/H3C ePortal portals fall back to the canonical endpoint.
+func parseFormWithFollowRedirect(
+	ctx context.Context,
+	client *http.Client,
+	bodyBytes []byte,
+	baseURL string,
+	logger *slog.Logger,
+	debug bool,
+) (*portal.FormData, string, error) {
+	fd, finalURL, err := tryParseForm(ctx, client, bodyBytes, baseURL, logger, debug)
+	if err != nil {
+		// If no form was found, check if this is a Ruijie ePortal with
+		// JS-rendered login — synthesize the form from known Ruijie fields.
+		if errors.Is(err, portal.ErrNoForm) {
+			if ruijieFD := tryRuijieSynthesis(bodyBytes, baseURL, logger); ruijieFD != nil {
+				return ruijieFD, baseURL, nil
+			}
+		}
+		return nil, baseURL, err
+	}
+
+	// If the action is still the bare portal page URL the form was synthesised
+	// from id-based inputs — we need to find the real AJAX submission endpoint.
+	if fd.Action == baseURL || fd.Action == finalURL {
+		if resolved := resolveFormAction(ctx, client, bodyBytes, baseURL, logger, debug); resolved != "" {
+			logger.Info("resolved JS login action", "url", resolved)
+			fd.Action = resolved
+		}
+	}
+
+	// Ruijie ePortal requires a queryString parameter whose value is the
+	// URL-encoded query string from the original portal page URL.
+	if strings.Contains(fd.Action, "InterFace.do") {
+		if qs := portalQueryString(baseURL); qs != "" {
+			fd.Fields["queryString"] = qs
+			fd.Fields["operatorPwd"] = ""
+			fd.Fields["operatorUserId"] = ""
+			fd.Fields["validcode"] = ""
+			fd.Fields["passwordEncrypt"] = "false"
+			fd.Fields["service"] = ""
+			logger.Info("Ruijie ePortal detected — added queryString", "queryString", qs)
+		}
+	}
+
+	return fd, finalURL, nil
+}
+
+// tryParseForm performs the core form-parse + one-level redirect-follow.
+func tryParseForm(
+	ctx context.Context,
+	client *http.Client,
+	bodyBytes []byte,
+	baseURL string,
+	logger *slog.Logger,
+	debug bool,
+) (*portal.FormData, string, error) {
+	fd, err := portal.ParseLoginForm(bytes.NewReader(bodyBytes), baseURL)
+	if err == nil {
+		return fd, baseURL, nil
+	}
+
+	var redir *portal.ErrRedirect
+	if !errors.As(err, &redir) {
+		return nil, baseURL, err
+	}
+
+	logger.Info("portal redirects to iframe/frame/JS target, following", "url", redir.URL)
+
+	req, fetchErr := http.NewRequestWithContext(ctx, "GET", redir.URL, nil)
+	if fetchErr != nil {
+		return nil, redir.URL, fmt.Errorf("create redirect request: %w", fetchErr)
+	}
+	resp, fetchErr := client.Do(req)
+	if fetchErr != nil {
+		return nil, redir.URL, fmt.Errorf("fetch redirect page: %w", fetchErr)
+	}
+	defer resp.Body.Close()
+
+	redirectedURL := resp.Request.URL.String()
+	redirectBody, fetchErr := io.ReadAll(resp.Body)
+	if fetchErr != nil {
+		return nil, redirectedURL, fmt.Errorf("read redirect body: %w", fetchErr)
+	}
+
+	if debug {
+		snip := string(redirectBody)
+		if len(snip) > 2000 {
+			snip = snip[:2000]
+		}
+		logger.Debug("redirect page HTML", "url", redirectedURL, "body", snip)
+	}
+
+	fd, err = portal.ParseLoginForm(bytes.NewReader(redirectBody), redirectedURL)
+	if err != nil {
+		return nil, redirectedURL, err
+	}
+	return fd, redirectedURL, nil
+}
+
+// resolveFormAction fetches the portal page's external JS scripts and attempts
+// to extract the login submission URL.  Falls back to the Ruijie canonical
+// endpoint when the portal is identified as a Ruijie/H3C ePortal.
+func resolveFormAction(
+	ctx context.Context,
+	client *http.Client,
+	pageBody []byte,
+	baseURL string,
+	logger *slog.Logger,
+	debug bool,
+) string {
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+
+	// Parse the document again to extract script URLs and detect Ruijie.
+	doc, parseErr := portal.ParseDoc(bytes.NewReader(pageBody))
+	if parseErr != nil {
+		return ""
+	}
+
+	scriptURLs := portal.ExtractScriptURLs(doc, base)
+
+	// Scan each linked JS file for a login action URL.
+	for _, scriptURL := range scriptURLs {
+		sreq, reqErr := http.NewRequestWithContext(ctx, "GET", scriptURL, nil)
+		if reqErr != nil {
+			continue
+		}
+		sresp, respErr := client.Do(sreq)
+		if respErr != nil {
+			continue
+		}
+		scriptBytes, readErr := io.ReadAll(io.LimitReader(sresp.Body, 512*1024))
+		sresp.Body.Close()
+		if readErr != nil {
+			continue
+		}
+		script := string(scriptBytes)
+		if debug {
+			logger.Debug("inspecting JS for login action", "url", scriptURL, "size", len(script))
+		}
+		if action := portal.FindLoginActionInScript(script, baseURL); action != "" {
+			return action
+		}
+	}
+
+	// Ruijie fingerprint fallback — use canonical endpoint without needing JS.
+	if portal.IsRuijiePortal(doc) {
+		action := portal.RuijieLoginURL(baseURL)
+		logger.Info("Ruijie ePortal fingerprinted — using canonical login URL", "action", action)
+		return action
+	}
+
+	return ""
+}
+
+// tryRuijieSynthesis parses the HTML body, checks for Ruijie ePortal
+// fingerprints, and returns a fully populated FormData if detected.
+// Returns nil when the page is not a Ruijie portal.
+func tryRuijieSynthesis(bodyBytes []byte, baseURL string, logger *slog.Logger) *portal.FormData {
+	doc, err := portal.ParseDoc(bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil
+	}
+
+	fd := portal.SynthesizeRuijieForm(doc, baseURL)
+	if fd == nil {
+		return nil
+	}
+
+	// Populate queryString from the portal page URL.
+	if qs := portalQueryString(baseURL); qs != "" {
+		fd.Fields["queryString"] = qs
+	}
+
+	logger.Info("Ruijie ePortal detected — synthesized login form",
+		"action", fd.Action,
+		"queryString", fd.Fields["queryString"],
+	)
+
+	return fd
+}
+
+// portalQueryString returns the raw query string from portalURL, URL-encoded
+// for use as the Ruijie ePortal queryString POST parameter.
+func portalQueryString(portalURL string) string {
+	u, err := url.Parse(portalURL)
+	if err != nil || u.RawQuery == "" {
+		return ""
+	}
+	return u.RawQuery
+}
+
 
 func handleCreds(args []string) error {
 	if len(args) == 0 {
@@ -307,16 +536,37 @@ func promptForCredentials(ssid string, form *portal.FormData) (*credential.Crede
 	reader := bufio.NewReader(os.Stdin)
 
 	fmt.Printf("No saved credentials for SSID: %q. First-time setup…\n", ssid)
-	fmt.Print("Enter your Wi-Fi username/ID: ")
-	username, _ := reader.ReadString('\n')
-	username = strings.TrimSpace(username)
 
-	fmt.Print("Enter your Wi-Fi password: ")
-	password, _ := reader.ReadString('\n')
-	password = strings.TrimSpace(password)
+	var username, password string
+	if form == nil || form.UsernameField != "" {
+		promptText := "Enter your Wi-Fi username/ID: "
+		if form != nil && form.UsernameField != "" {
+			lower := strings.ToLower(form.UsernameField)
+			if strings.Contains(lower, "email") {
+				promptText = "Enter your Email: "
+			} else if strings.Contains(lower, "phone") || strings.Contains(lower, "mobile") {
+				promptText = "Enter your Phone number: "
+			} else if strings.Contains(lower, "code") || strings.Contains(lower, "voucher") {
+				promptText = "Enter your Voucher/Access Code: "
+			}
+		}
+		fmt.Print(promptText)
+		username, _ = reader.ReadString('\n')
+		username = strings.TrimSpace(username)
+	}
 
-	if username == "" || password == "" {
-		return nil, fmt.Errorf("credentials cannot be empty")
+	if form == nil || form.PasswordField != "" {
+		fmt.Print("Enter your Wi-Fi password: ")
+		password, _ = reader.ReadString('\n')
+		password = strings.TrimSpace(password)
+	}
+
+	// Validation: require at least one field if the form asks for it
+	if (form == nil || form.UsernameField != "") && username == "" {
+		return nil, fmt.Errorf("username/ID cannot be empty")
+	}
+	if (form == nil || form.PasswordField != "") && password == "" {
+		return nil, fmt.Errorf("password cannot be empty")
 	}
 
 	creds := &credential.Credentials{
