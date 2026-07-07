@@ -256,8 +256,8 @@ func parseFormWithFollowRedirect(
 		}
 	}
 
-	// Ruijie ePortal requires a queryString parameter whose value is the
-	// URL-encoded query string from the original portal page URL.
+	// Ruijie ePortal (classic) requires a queryString parameter whose value
+	// is the URL-encoded query string from the original portal page URL.
 	if strings.Contains(fd.Action, "InterFace.do") {
 		if qs := portalQueryString(baseURL); qs != "" {
 			fd.Fields["queryString"] = qs
@@ -268,6 +268,31 @@ func parseFormWithFollowRedirect(
 			fd.Fields["service"] = ""
 			logger.Info("Ruijie ePortal detected — added queryString", "queryString", qs)
 		}
+	}
+
+	// Ruijie ePortal (newer / 2nd-gen) uses /portalauth/syncPortalResult
+	// and expects: userName (not username), password, plus each query
+	// parameter from the portal page URL as an individual POST field.
+	if strings.Contains(fd.Action, "portalauth") {
+		// Remap 'username' → 'userName' (Ruijie convention).
+		if fd.UsernameField == "username" {
+			fd.UsernameField = "userName"
+			delete(fd.Fields, "username")
+			fd.Fields["userName"] = ""
+		}
+
+		// Carry portal page URL query params into POST fields.
+		if parsed, parseErr := url.Parse(finalURL); parseErr == nil {
+			for k, vs := range parsed.Query() {
+				if _, exists := fd.Fields[k]; !exists && len(vs) > 0 {
+					fd.Fields[k] = vs[0]
+				}
+			}
+		}
+		logger.Info("Ruijie portalauth detected — added page params",
+			"action", fd.Action,
+			"usernameField", fd.UsernameField,
+		)
 	}
 
 	return fd, finalURL, nil
