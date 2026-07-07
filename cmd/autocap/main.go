@@ -270,9 +270,9 @@ func parseFormWithFollowRedirect(
 		}
 	}
 
-	// Ruijie ePortal (newer / 2nd-gen) uses /portalauth/syncPortalResult
-	// and expects: userName (not username), password, plus each query
-	// parameter from the portal page URL as an individual POST field.
+	// Ruijie ePortal (newer / 2nd-gen) uses /portalauth/login and expects:
+	//   userName (not username), userPass (not password), plus each query
+	//   parameter from the portal page URL as an individual POST field.
 	if strings.Contains(fd.Action, "portalauth") {
 		// Remap 'username' → 'userName' (Ruijie convention).
 		if fd.UsernameField == "username" {
@@ -280,6 +280,14 @@ func parseFormWithFollowRedirect(
 			delete(fd.Fields, "username")
 			fd.Fields["userName"] = ""
 		}
+		// Remap 'password' → 'userPass' (Ruijie convention).
+		if fd.PasswordField == "password" {
+			fd.PasswordField = "userPass"
+			delete(fd.Fields, "password")
+			fd.Fields["userPass"] = ""
+		}
+		// Always agree to terms.
+		fd.Fields["agreed"] = "1"
 
 		// Carry portal page URL query params into POST fields.
 		if parsed, parseErr := url.Parse(finalURL); parseErr == nil {
@@ -292,6 +300,7 @@ func parseFormWithFollowRedirect(
 		logger.Info("Ruijie portalauth detected — added page params",
 			"action", fd.Action,
 			"usernameField", fd.UsernameField,
+			"passwordField", fd.PasswordField,
 		)
 	}
 
