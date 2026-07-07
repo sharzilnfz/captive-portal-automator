@@ -50,6 +50,17 @@ func (s *Submitter) Submit(ctx context.Context, form *portal.FormData, creds *cr
 		payload.Set(passwordField, creds.Password)
 	}
 
+	// Debug: log what we're about to send (redact password).
+	debugFields := make([]string, 0, len(payload))
+	for k := range payload {
+		if k == passwordField {
+			debugFields = append(debugFields, k+"=***")
+		} else {
+			debugFields = append(debugFields, k+"="+payload.Get(k))
+		}
+	}
+	s.logger.Debug("login payload", "fields", debugFields)
+
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
@@ -94,9 +105,18 @@ func (s *Submitter) Submit(ctx context.Context, form *portal.FormData, creds *cr
 		return fmt.Errorf("auth: submit: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
 
+	// Read and log the response body (portals often return error details).
+	respBody, _ := io.ReadAll(resp.Body)
 	s.logger.Info("login submitted", "status", resp.StatusCode)
+	if len(respBody) > 0 {
+		snip := string(respBody)
+		if len(snip) > 1000 {
+			snip = snip[:1000]
+		}
+		s.logger.Debug("login response body", "body", snip)
+	}
+
 	return nil
 }
 

@@ -448,7 +448,7 @@ func portalQueryString(portalURL string) string {
 
 func handleCreds(args []string) error {
 	if len(args) == 0 {
-		fmt.Println("Usage: autocap creds <list|add|remove> [SSID]")
+		fmt.Println("Usage: autocap creds <list|add|remove|reset> [SSID]")
 		return nil
 	}
 
@@ -471,7 +471,7 @@ func handleCreds(args []string) error {
 		}
 		fmt.Println("Saved credentials:")
 		for _, ssid := range ssids {
-			fmt.Printf("  • %s\n", ssid)
+			fmt.Printf("  • %q\n", ssid)
 		}
 
 	case "add":
@@ -495,6 +495,29 @@ func handleCreds(args []string) error {
 			return fmt.Errorf("delete credentials: %w", err)
 		}
 		fmt.Printf("Credentials removed for %q\n", args[1])
+
+	case "reset":
+		ssids, err := store.List()
+		if err != nil {
+			// Try file store as well
+			fileStore := credential.NewFileStore(filepath.Join(configDir(), "credentials.json"))
+			ssids, _ = fileStore.List()
+		}
+		if len(ssids) == 0 {
+			fmt.Println("No saved credentials to reset.")
+			return nil
+		}
+		for _, ssid := range ssids {
+			if delErr := store.Delete(ssid); delErr != nil && !errors.Is(delErr, credential.ErrNotFound) {
+				logger.Warn("failed to delete credential", "ssid", ssid, "error", delErr)
+			}
+		}
+		// Also nuke the index file directly.
+		indexPath := filepath.Join(configDir(), "keyring_index.json")
+		os.Remove(indexPath)
+		// Also remove file-store credentials if present.
+		os.Remove(filepath.Join(configDir(), "credentials.json"))
+		fmt.Printf("All credentials removed (%d entries).\n", len(ssids))
 
 	default:
 		return fmt.Errorf("unknown creds command: %s", args[0])
