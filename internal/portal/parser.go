@@ -23,7 +23,7 @@ func (e *ErrRedirect) Error() string {
 
 // jsRedirectRe matches common JS location-redirect patterns.
 var jsRedirectRe = regexp.MustCompile(
-	`location\.(?:href|replace|assign)\s*[=(]\s*["']([^"']+)["']|window\.location\s*=\s*["']([^"']+)["']`,
+	`location\.(?:href|replace|assign)\s*[=(]\s*["']([^"']+)["']|(?:window|document|top)\.location(?:\.href)?\s*=\s*["']([^"']+)["']`,
 )
 
 // FormData represents a parsed captive portal login form.
@@ -36,6 +36,7 @@ type FormData struct {
 	FormIndex     int
 	PageURL       string // URL of the page where the form was parsed from (used for Referer header)
 	AjaxHint      bool   // true for JS-synthesized forms (Ruijie etc.)
+	HasHidden     bool   // true if form contains hidden input fields
 }
 
 // ErrNoForm is returned when no form element is found on the page.
@@ -87,7 +88,7 @@ func ParseLoginForm(body io.Reader, baseURL string) (*FormData, error) {
 	bestScore := -1
 
 	for i, formNode := range forms {
-		fd := extractFormData(formNode, base, i)
+		fd := extractFormData(formNode, base, i, doc)
 		score := scoreForm(fd)
 		if score > bestScore {
 			bestScore = score
@@ -101,9 +102,10 @@ func ParseLoginForm(body io.Reader, baseURL string) (*FormData, error) {
 
 	best.PageURL = baseURL
 
-	// If the "best" form has no username, password, or fields (e.g. search box or empty form)
-	// but the page contains a redirect (meta-refresh/JS/iframe), prefer the redirect target.
-	if best.UsernameField == "" && best.PasswordField == "" && len(best.Fields) == 0 {
+	// If the "best" form has no username or password field and no hidden state
+	// (e.g. search box or empty form), but the page contains a redirect
+	// (meta-refresh/JS/iframe), prefer the redirect target.
+	if best.UsernameField == "" && best.PasswordField == "" && !best.HasHidden {
 		if redir := extractRedirectFromDoc(doc, base); redir != "" {
 			return nil, &ErrRedirect{URL: redir}
 		}
@@ -157,6 +159,7 @@ func extractRedirectFromDoc(doc *html.Node, base *url.URL) string {
 					// Format: "N;url=TARGET" or "N;URL=TARGET"
 					if idx := strings.Index(strings.ToLower(content), "url="); idx >= 0 {
 						target := content[idx+4:]
+						target = strings.Trim(strings.TrimSpace(target), `"'`)
 						if resolved, err := base.Parse(target); err == nil {
 							result = resolved.String()
 							return
@@ -173,6 +176,7 @@ func extractRedirectFromDoc(doc *html.Node, base *url.URL) string {
 							target = m[2]
 						}
 						if target != "" {
+							target = strings.Trim(strings.TrimSpace(target), `"'`)
 							if resolved, err := base.Parse(target); err == nil {
 								result = resolved.String()
 								return
@@ -191,7 +195,7 @@ func extractRedirectFromDoc(doc *html.Node, base *url.URL) string {
 }
 
 // extractFormData extracts form metadata and input fields from a <form> node.
-func extractFormData(formNode *html.Node, base *url.URL, index int) *FormData {
+func extractFormData(formNode *html.Node, base *url.URL, index int, doc *html.Node) *FormData {
 	fd := &FormData{
 		Fields:    make(map[string]string),
 		FormIndex: index,
@@ -213,60 +217,84 @@ func extractFormData(formNode *html.Node, base *url.URL, index int) *FormData {
 	}
 
 	var textInputs []string
+	processInput := func(n *html.Node) {
+		if hasAttr(n, "disabled") {
+			return
+		}
+		name := getAttr(n, "name")
+		if name != "" {
+			inputType := strings.ToLower(getAttr(n, "type"))
+			if inputType == "" {
+				inputType = "text"
+			}
+			value := getAttr(n, "value")
+
+			if inputType == "hidden" {
+				fd.HasHidden = true
+			}
+
+			if inputType == "checkbox" {
+				if value == "" {
+					value = "on"
+				}
+				fd.Fields[name] = value
+			} else if inputType == "radio" {
+				hasChecked := hasAttr(n, "checked")
+				_, exists := fd.Fields[name]
+				if !exists || hasChecked {
+					fd.Fields[name] = value
+				}
+			} else if inputType == "image" {
+				fd.Fields[name+".x"] = "0"
+				fd.Fields[name+".y"] = "0"
+			} else {
+				fd.Fields[name] = value
+			}
+
+			switch inputType {
+			case "password":
+				fd.PasswordField = name
+			case "text", "email", "tel":
+				textInputs = append(textInputs, name)
+				lower := strings.ToLower(name)
+				for _, kw := range usernameKeywords {
+					if strings.Contains(lower, kw) {
+						if fd.UsernameField == "" {
+							fd.UsernameField = name
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode && (n.Data == "input" || n.Data == "select" || n.Data == "textarea") {
-			if hasAttr(n, "disabled") {
-				return
-			}
-			name := getAttr(n, "name")
-			if name != "" {
-				inputType := strings.ToLower(getAttr(n, "type"))
-				if inputType == "" {
-					inputType = "text"
-				}
-				value := getAttr(n, "value")
-
-				if inputType == "checkbox" {
-					if value == "" {
-						value = "on"
-					}
-					fd.Fields[name] = value
-				} else if inputType == "radio" {
-					hasChecked := hasAttr(n, "checked")
-					_, exists := fd.Fields[name]
-					if !exists || hasChecked {
-						fd.Fields[name] = value
-					}
-				} else if inputType == "image" {
-					fd.Fields[name+".x"] = "0"
-					fd.Fields[name+".y"] = "0"
-				} else {
-					fd.Fields[name] = value
-				}
-
-				switch inputType {
-				case "password":
-					fd.PasswordField = name
-				case "text", "email", "tel":
-					textInputs = append(textInputs, name)
-					lower := strings.ToLower(name)
-					for _, kw := range usernameKeywords {
-						if strings.Contains(lower, kw) {
-							if fd.UsernameField == "" {
-								fd.UsernameField = name
-							}
-							break
-						}
-					}
-				}
-			}
+			processInput(n)
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			walk(c)
 		}
 	}
 	walk(formNode)
+
+	// HTML5: check for inputs outside the form linked via form="id"
+	if formID := getAttr(formNode, "id"); formID != "" && doc != nil {
+		var walkDoc func(*html.Node)
+		walkDoc = func(n *html.Node) {
+			if n.Type == html.ElementNode && (n.Data == "input" || n.Data == "select" || n.Data == "textarea") {
+				if getAttr(n, "form") == formID {
+					processInput(n)
+				}
+			}
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				walkDoc(c)
+			}
+		}
+		walkDoc(doc)
+	}
 
 	// Fallback: first text input that isn't the password field
 	if fd.UsernameField == "" && fd.PasswordField != "" {

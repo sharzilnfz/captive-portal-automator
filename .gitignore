@@ -1,9 +1,11 @@
 # Build artifacts
 /autocap
 build/
+repomix-output.xml
 
 # macOS
 .DS_Store
 
 # Node.js (legacy v1)
 node_modules/
+
