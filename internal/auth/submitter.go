@@ -15,6 +15,13 @@ import (
 	"github.com/sharzilnafis/autocap/internal/prober"
 )
 
+// LoginResult provides details about the submitted login HTTP response.
+type LoginResult struct {
+	StatusCode int
+	FinalURL   string
+	Body       string
+}
+
 // Submitter handles login form submission and verification.
 type Submitter struct {
 	client *http.Client
@@ -27,7 +34,7 @@ func NewSubmitter(client *http.Client, logger *slog.Logger) *Submitter {
 }
 
 // Submit sends the login form with credentials.
-func (s *Submitter) Submit(ctx context.Context, form *portal.FormData, creds *credential.Credentials) error {
+func (s *Submitter) Submit(ctx context.Context, form *portal.FormData, creds *credential.Credentials) (*LoginResult, error) {
 	payload := url.Values{}
 	for k, v := range form.Fields {
 		payload.Set(k, v)
@@ -75,7 +82,7 @@ func (s *Submitter) Submit(ctx context.Context, form *portal.FormData, creds *cr
 	if method == "GET" {
 		u, parseErr := url.Parse(form.Action)
 		if parseErr != nil {
-			return fmt.Errorf("auth: parse action URL: %w", parseErr)
+			return nil, fmt.Errorf("auth: parse action URL: %w", parseErr)
 		}
 		q := u.Query()
 		for k, vs := range payload {
@@ -93,33 +100,51 @@ func (s *Submitter) Submit(ctx context.Context, form *portal.FormData, creds *cr
 		}
 	}
 	if err != nil {
-		return fmt.Errorf("auth: create request: %w", err)
+		return nil, fmt.Errorf("auth: create request: %w", err)
 	}
 
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 
+	refererURL := form.PageURL
+	if refererURL == "" {
+		refererURL = form.Action
+	}
+	if refererURL != "" {
+		req.Header.Set("Referer", refererURL)
+	}
+
 	if form.Action != "" {
-		req.Header.Set("Referer", form.Action)
 		if actionURL, parseErr := url.Parse(form.Action); parseErr == nil && actionURL.Scheme != "" && actionURL.Host != "" {
 			req.Header.Set("Origin", fmt.Sprintf("%s://%s", actionURL.Scheme, actionURL.Host))
 		}
+	}
+
+	if form.AjaxHint {
+		req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	}
 
 	s.logger.Info("submitting login", "action", form.Action, "method", method)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("auth: submit: %w", err)
+		return nil, fmt.Errorf("auth: submit: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Read and log the response body (portals often return error details).
-	respBody, _ := io.ReadAll(resp.Body)
-	s.logger.Info("login submitted", "status", resp.StatusCode)
-	if len(respBody) > 0 {
-		snip := string(respBody)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	bodyStr := string(respBody)
+
+	result := &LoginResult{
+		StatusCode: resp.StatusCode,
+		FinalURL:   resp.Request.URL.String(),
+		Body:       bodyStr,
+	}
+
+	s.logger.Info("login submitted", "status", result.StatusCode, "finalURL", result.FinalURL)
+	if len(result.Body) > 0 {
+		snip := result.Body
 		if len(snip) > 1000 {
 			snip = snip[:1000]
 		}
@@ -140,17 +165,28 @@ func (s *Submitter) Submit(ctx context.Context, form *portal.FormData, creds *cr
 		}
 	}
 
-	return nil
+	return result, nil
 }
 
-// Verify re-probes to confirm internet access after login.
+// Verify re-probes to confirm internet access after login, using retries with backoff.
 func (s *Submitter) Verify(ctx context.Context, p *prober.Prober) (bool, error) {
-	select {
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case <-time.After(2500 * time.Millisecond):
-	}
+	delay := 2 * time.Second
+	for attempt := 1; attempt <= 5; attempt++ {
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(delay):
+		}
 
-	result := p.Check(ctx)
-	return result.Online, nil
+		result := p.Check(ctx)
+		if result.Online {
+			s.logger.Info("connectivity verified online", "attempt", attempt)
+			return true, nil
+		}
+		s.logger.Info("connectivity check pending", "attempt", attempt)
+		if delay < 8*time.Second {
+			delay *= 2
+		}
+	}
+	return false, nil
 }

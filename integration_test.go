@@ -135,7 +135,7 @@ func TestIntegration_FullFlow_POST(t *testing.T) {
 	}
 
 	sub := auth.NewSubmitter(client, logger)
-	if err := sub.Submit(context.Background(), formData, creds); err != nil {
+	if _, err := sub.Submit(context.Background(), formData, creds); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 
@@ -228,9 +228,12 @@ func TestIntegration_WrongCredentials(t *testing.T) {
 	}
 
 	sub := auth.NewSubmitter(client, logger)
-	err := sub.Submit(context.Background(), formData, creds)
+	res, err := sub.Submit(context.Background(), formData, creds)
 	if err != nil {
 		t.Fatalf("submit should not error (server returned 401): %v", err)
+	}
+	if res.StatusCode != 401 {
+		t.Errorf("StatusCode: want 401, got %d", res.StatusCode)
 	}
 
 	if mock.isOnline {

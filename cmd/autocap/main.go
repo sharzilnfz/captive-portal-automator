@@ -12,21 +12,38 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	autocapLog "github.com/sharzilnafis/autocap/internal/log"
 	"github.com/sharzilnafis/autocap/internal/auth"
 	"github.com/sharzilnafis/autocap/internal/credential"
+	autocapLog "github.com/sharzilnafis/autocap/internal/log"
 	"github.com/sharzilnafis/autocap/internal/network"
 	"github.com/sharzilnafis/autocap/internal/portal"
 	"github.com/sharzilnafis/autocap/internal/prober"
 )
 
 const version = "2.0.0"
+
+type debugTransport struct {
+	base   http.RoundTripper
+	logger *slog.Logger
+}
+
+func (d *debugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if dump, err := httputil.DumpRequestOut(req, true); err == nil {
+		d.logger.Debug("http request dump", "dump", string(dump))
+	}
+	resp, err := d.base.RoundTrip(req)
+	if err == nil {
+		d.logger.Debug("http response", "status", resp.StatusCode, "setCookie", resp.Header.Values("Set-Cookie"))
+	}
+	return resp, err
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -85,16 +102,21 @@ func handleAutomate(args []string) error {
 	}
 	logger.Info("checking network", "ssid", ssid, "time", time.Now().Format(time.RFC3339))
 
-	// Create shared HTTP client with cookie jar
+	// Create shared HTTP client with cookie jar and TLS fallback
+	var baseTransport http.RoundTripper = &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, // captive portals use self-signed certs
+		},
+	}
+	if *debug {
+		baseTransport = &debugTransport{base: baseTransport, logger: logger}
+	}
+
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{
-		Jar:     jar,
-		Timeout: 15 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, // captive portals use self-signed certs
-			},
-		},
+		Jar:       jar,
+		Timeout:   15 * time.Second,
+		Transport: baseTransport,
 	}
 
 	ctx := context.Background()
@@ -141,13 +163,12 @@ func handleAutomate(args []string) error {
 		logger.Debug("portal HTML", "body", snip)
 	}
 
-	// Parse the login form, following one level of redirect if needed.
+	// Parse the login form, following redirect chains if needed.
 	var formData *portal.FormData
 	formData, _, err = parseFormWithFollowRedirect(ctx, client, bodyBytes, finalLoginURL, logger, *debug)
 	if err != nil {
 		return fmt.Errorf("parse login form: %w", err)
 	}
-
 
 	logger.Info("form parsed",
 		"action", formData.Action,
@@ -203,8 +224,12 @@ func handleAutomate(args []string) error {
 
 	// Submit login
 	sub := auth.NewSubmitter(client, logger)
-	if err := sub.Submit(ctx, formData, creds); err != nil {
+	loginRes, err := sub.Submit(ctx, formData, creds)
+	if err != nil {
 		return fmt.Errorf("submit login: %w", err)
+	}
+	if loginRes != nil {
+		logger.Info("login HTTP submitted", "statusCode", loginRes.StatusCode, "finalURL", loginRes.FinalURL)
 	}
 
 	// Verify
@@ -307,7 +332,7 @@ func parseFormWithFollowRedirect(
 	return fd, finalURL, nil
 }
 
-// tryParseForm performs the core form-parse + one-level redirect-follow.
+// tryParseForm performs the core form-parse + multi-level redirect-follow (up to 5 hops).
 func tryParseForm(
 	ctx context.Context,
 	client *http.Client,
@@ -316,47 +341,52 @@ func tryParseForm(
 	logger *slog.Logger,
 	debug bool,
 ) (*portal.FormData, string, error) {
-	fd, err := portal.ParseLoginForm(bytes.NewReader(bodyBytes), baseURL)
-	if err == nil {
-		return fd, baseURL, nil
-	}
+	const maxHops = 5
+	currentBody := bodyBytes
+	currentURL := baseURL
 
-	var redir *portal.ErrRedirect
-	if !errors.As(err, &redir) {
-		return nil, baseURL, err
-	}
-
-	logger.Info("portal redirects to iframe/frame/JS target, following", "url", redir.URL)
-
-	req, fetchErr := http.NewRequestWithContext(ctx, "GET", redir.URL, nil)
-	if fetchErr != nil {
-		return nil, redir.URL, fmt.Errorf("create redirect request: %w", fetchErr)
-	}
-	resp, fetchErr := client.Do(req)
-	if fetchErr != nil {
-		return nil, redir.URL, fmt.Errorf("fetch redirect page: %w", fetchErr)
-	}
-	defer resp.Body.Close()
-
-	redirectedURL := resp.Request.URL.String()
-	redirectBody, fetchErr := io.ReadAll(resp.Body)
-	if fetchErr != nil {
-		return nil, redirectedURL, fmt.Errorf("read redirect body: %w", fetchErr)
-	}
-
-	if debug {
-		snip := string(redirectBody)
-		if len(snip) > 2000 {
-			snip = snip[:2000]
+	for hop := 0; hop < maxHops; hop++ {
+		fd, err := portal.ParseLoginForm(bytes.NewReader(currentBody), currentURL)
+		if err == nil {
+			return fd, currentURL, nil
 		}
-		logger.Debug("redirect page HTML", "url", redirectedURL, "body", snip)
+
+		var redir *portal.ErrRedirect
+		if !errors.As(err, &redir) {
+			return nil, currentURL, err
+		}
+
+		logger.Info("portal redirects to iframe/frame/JS target, following", "hop", hop+1, "url", redir.URL)
+
+		req, fetchErr := http.NewRequestWithContext(ctx, "GET", redir.URL, nil)
+		if fetchErr != nil {
+			return nil, redir.URL, fmt.Errorf("create redirect request: %w", fetchErr)
+		}
+		resp, fetchErr := client.Do(req)
+		if fetchErr != nil {
+			return nil, redir.URL, fmt.Errorf("fetch redirect page: %w", fetchErr)
+		}
+
+		redirectedURL := resp.Request.URL.String()
+		redirectBody, fetchErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if fetchErr != nil {
+			return nil, redirectedURL, fmt.Errorf("read redirect body: %w", fetchErr)
+		}
+
+		if debug {
+			snip := string(redirectBody)
+			if len(snip) > 2000 {
+				snip = snip[:2000]
+			}
+			logger.Debug("redirect page HTML", "url", redirectedURL, "body", snip)
+		}
+
+		currentBody = redirectBody
+		currentURL = redirectedURL
 	}
 
-	fd, err = portal.ParseLoginForm(bytes.NewReader(redirectBody), redirectedURL)
-	if err != nil {
-		return nil, redirectedURL, err
-	}
-	return fd, redirectedURL, nil
+	return nil, currentURL, fmt.Errorf("too many portal redirect hops")
 }
 
 // resolveFormAction fetches the portal page's external JS scripts and attempts

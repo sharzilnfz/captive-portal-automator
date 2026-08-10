@@ -34,6 +34,8 @@ type FormData struct {
 	UsernameField string
 	PasswordField string
 	FormIndex     int
+	PageURL       string // URL of the page where the form was parsed from (used for Referer header)
+	AjaxHint      bool   // true for JS-synthesized forms (Ruijie etc.)
 }
 
 // ErrNoForm is returned when no form element is found on the page.
@@ -45,7 +47,7 @@ var usernameKeywords = []string{
 	"member", "account", "id", "telephone",
 }
 
-// ParseDoc parses raw HTML from r into a DOM tree.  Callers can use the
+// ParseDoc parses raw HTML from r into a DOM tree. Callers can use the
 // returned node with ExtractScriptURLs, IsRuijiePortal, etc. without
 // re-fetching the page.
 func ParseDoc(r io.Reader) (*html.Node, error) {
@@ -96,6 +98,17 @@ func ParseLoginForm(body io.Reader, baseURL string) (*FormData, error) {
 	if best == nil {
 		return nil, ErrNoForm
 	}
+
+	best.PageURL = baseURL
+
+	// If the "best" form has no username, password, or fields (e.g. search box or empty form)
+	// but the page contains a redirect (meta-refresh/JS/iframe), prefer the redirect target.
+	if best.UsernameField == "" && best.PasswordField == "" && len(best.Fields) == 0 {
+		if redir := extractRedirectFromDoc(doc, base); redir != "" {
+			return nil, &ErrRedirect{URL: redir}
+		}
+	}
+
 	return best, nil
 }
 
@@ -182,6 +195,7 @@ func extractFormData(formNode *html.Node, base *url.URL, index int) *FormData {
 	fd := &FormData{
 		Fields:    make(map[string]string),
 		FormIndex: index,
+		PageURL:   base.String(),
 	}
 
 	fd.Action = getAttr(formNode, "action")
@@ -202,6 +216,9 @@ func extractFormData(formNode *html.Node, base *url.URL, index int) *FormData {
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode && (n.Data == "input" || n.Data == "select" || n.Data == "textarea") {
+			if hasAttr(n, "disabled") {
+				return
+			}
 			name := getAttr(n, "name")
 			if name != "" {
 				inputType := strings.ToLower(getAttr(n, "type"))
@@ -221,6 +238,9 @@ func extractFormData(formNode *html.Node, base *url.URL, index int) *FormData {
 					if !exists || hasChecked {
 						fd.Fields[name] = value
 					}
+				} else if inputType == "image" {
+					fd.Fields[name+".x"] = "0"
+					fd.Fields[name+".y"] = "0"
 				} else {
 					fd.Fields[name] = value
 				}
@@ -285,9 +305,11 @@ func scoreForm(fd *FormData) int {
 // Returns nil when no recognisable username/password inputs are found.
 func synthesizeFormFromIDs(doc *html.Node, base *url.URL) *FormData {
 	fd := &FormData{
-		Fields: make(map[string]string),
-		Action: base.String(), // caller should resolve action from auth.js
-		Method: "POST",
+		Fields:   make(map[string]string),
+		Action:   base.String(), // caller should resolve action from auth.js
+		Method:   "POST",
+		PageURL:  base.String(),
+		AjaxHint: true,
 	}
 
 	var textInputs []string
@@ -295,6 +317,9 @@ func synthesizeFormFromIDs(doc *html.Node, base *url.URL) *FormData {
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode && n.Data == "input" {
+			if hasAttr(n, "disabled") {
+				return
+			}
 			// Prefer name attribute; fall back to id.
 			key := getAttr(n, "name")
 			if key == "" {
@@ -342,6 +367,9 @@ func synthesizeFormFromIDs(doc *html.Node, base *url.URL) *FormData {
 				if !exists || hasChecked {
 					fd.Fields[key] = val
 				}
+			case "image":
+				fd.Fields[key+".x"] = "0"
+				fd.Fields[key+".y"] = "0"
 			}
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
@@ -389,6 +417,8 @@ func SynthesizeRuijieForm(doc *html.Node, baseURL string) *FormData {
 		Method:        "POST",
 		UsernameField: "userId",
 		PasswordField: "password",
+		PageURL:       baseURL,
+		AjaxHint:      true,
 		Fields: map[string]string{
 			"userId":          "",
 			"password":        "",

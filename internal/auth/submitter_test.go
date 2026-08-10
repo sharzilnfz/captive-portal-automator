@@ -53,9 +53,12 @@ func TestSubmitter_POST(t *testing.T) {
 		PasswordField: "pass",
 	}
 
-	err := sub.Submit(context.Background(), form, creds)
+	res, err := sub.Submit(context.Background(), form, creds)
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
+	}
+	if res.StatusCode != 200 {
+		t.Errorf("StatusCode: want 200, got %d", res.StatusCode)
 	}
 	if receivedUser != "student" {
 		t.Errorf("user: want 'student', got %q", receivedUser)
@@ -101,7 +104,7 @@ func TestSubmitter_GET(t *testing.T) {
 		PasswordField: "pass",
 	}
 
-	err := sub.Submit(context.Background(), form, creds)
+	_, err := sub.Submit(context.Background(), form, creds)
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
 	}
@@ -128,27 +131,33 @@ func TestSubmitter_Headers(t *testing.T) {
 	sub := NewSubmitter(client, testLogger())
 
 	actionURL := srv.URL + "/login"
+	pageURL := srv.URL + "/index.html"
 	form := &portal.FormData{
 		Action:        actionURL,
+		PageURL:       pageURL,
 		Method:        "POST",
 		UsernameField: "user",
 		PasswordField: "pass",
+		AjaxHint:      true,
 	}
 	creds := &credential.Credentials{
 		Username: "user",
 		Password: "pass",
 	}
 
-	err := sub.Submit(context.Background(), form, creds)
+	_, err := sub.Submit(context.Background(), form, creds)
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
 	}
 
-	if got := reqHeaders.Get("Referer"); got != actionURL {
-		t.Errorf("Referer: want %q, got %q", actionURL, got)
+	if got := reqHeaders.Get("Referer"); got != pageURL {
+		t.Errorf("Referer: want %q, got %q", pageURL, got)
 	}
 	if got := reqHeaders.Get("Origin"); got != srv.URL {
 		t.Errorf("Origin: want %q, got %q", srv.URL, got)
+	}
+	if got := reqHeaders.Get("X-Requested-With"); got != "XMLHttpRequest" {
+		t.Errorf("X-Requested-With: want 'XMLHttpRequest', got %q", got)
 	}
 	if got := reqHeaders.Get("User-Agent"); got == "" {
 		t.Error("User-Agent header should not be empty")
