@@ -25,6 +25,10 @@ var ajaxURLRe = regexp.MustCompile(`(?i)(?:\$\.(?:ajax|post|get)\s*\(\s*["']|fet
 // ajaxObjURLRe matches URL inside an $.ajax({ url: '...' }) object literal.
 var ajaxObjURLRe = regexp.MustCompile(`(?i)\$\.ajax\s*\(\s*\{[^}]*url\s*:\s*["']([^"']+)["']`)
 
+// xhrOpenRe matches standard XMLHttpRequest open calls in JS source.
+// e.g. xhr.open("POST", "/login.do") or xmlhttp.open("GET", "auth.php")
+var xhrOpenRe = regexp.MustCompile(`(?i)\.open\s*\(\s*["'](?:POST|GET)["']\s*,\s*["']([^"'?#][^"']*)["']`)
+
 // ExtractScriptURLs returns resolved URLs for all <script src="..."> tags in
 // the parsed HTML document.
 func ExtractScriptURLs(doc *html.Node, base *url.URL) []string {
@@ -85,6 +89,16 @@ func FindLoginActionInScript(script, baseURL string) string {
 
 	// 4. $.post('url') / fetch('url') positional syntax
 	if m := ajaxURLRe.FindStringSubmatch(script); m != nil {
+		candidate := strings.TrimSpace(m[1])
+		if strings.HasPrefix(candidate, "/") || strings.HasPrefix(candidate, "http") {
+			if resolved, err := base.Parse(candidate); err == nil {
+				return resolved.String()
+			}
+		}
+	}
+
+	// 5. xhr.open('POST', 'url') / xhr.open('GET', 'url') syntax
+	if m := xhrOpenRe.FindStringSubmatch(script); m != nil {
 		candidate := strings.TrimSpace(m[1])
 		if strings.HasPrefix(candidate, "/") || strings.HasPrefix(candidate, "http") {
 			if resolved, err := base.Parse(candidate); err == nil {

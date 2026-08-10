@@ -112,3 +112,48 @@ func TestSubmitter_GET(t *testing.T) {
 		t.Errorf("pass: want 'secret', got %q", receivedPass)
 	}
 }
+
+func TestSubmitter_Headers(t *testing.T) {
+	var reqHeaders http.Header
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqHeaders = r.Header.Clone()
+		w.WriteHeader(200)
+		fmt.Fprint(w, "OK")
+	}))
+	defer srv.Close()
+
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	sub := NewSubmitter(client, testLogger())
+
+	actionURL := srv.URL + "/login"
+	form := &portal.FormData{
+		Action:        actionURL,
+		Method:        "POST",
+		UsernameField: "user",
+		PasswordField: "pass",
+	}
+	creds := &credential.Credentials{
+		Username: "user",
+		Password: "pass",
+	}
+
+	err := sub.Submit(context.Background(), form, creds)
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+
+	if got := reqHeaders.Get("Referer"); got != actionURL {
+		t.Errorf("Referer: want %q, got %q", actionURL, got)
+	}
+	if got := reqHeaders.Get("Origin"); got != srv.URL {
+		t.Errorf("Origin: want %q, got %q", srv.URL, got)
+	}
+	if got := reqHeaders.Get("User-Agent"); got == "" {
+		t.Error("User-Agent header should not be empty")
+	}
+	if got := reqHeaders.Get("Accept"); got == "" {
+		t.Error("Accept header should not be empty")
+	}
+}

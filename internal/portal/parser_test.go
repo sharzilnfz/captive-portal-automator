@@ -445,3 +445,18 @@ func TestParseLoginForm_RadioButtons(t *testing.T) {
 	}
 }
 
+func TestFindLoginActionInScript_XHR(t *testing.T) {
+	script := `
+		function doLogin() {
+			var xhr = new XMLHttpRequest();
+			xhr.open("POST", "/api/v1/auth/login", true);
+			xhr.send();
+		}
+	`
+	got := FindLoginActionInScript(script, "http://10.0.0.1/portal/index.html")
+	want := "http://10.0.0.1/api/v1/auth/login"
+	if got != want {
+		t.Errorf("FindLoginActionInScript (XHR): want %q, got %q", want, got)
+	}
+}
+
