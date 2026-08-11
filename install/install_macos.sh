@@ -38,10 +38,12 @@ mkdir -p "$HOME/Library/LaunchAgents"
 cp "${PLIST_SRC}" "${PLIST_DST}"
 
 # Unload if already loaded
-launchctl bootout "gui/$(id -u)" "${PLIST_DST}" 2>/dev/null || true
+launchctl unload "${PLIST_DST}" 2>/dev/null || launchctl bootout "gui/$(id -u)" "${PLIST_DST}" 2>/dev/null || true
 
 # Load
-launchctl bootstrap "gui/$(id -u)" "${PLIST_DST}"
+chmod 644 "${PLIST_DST}"
+launchctl load -w "${PLIST_DST}" 2>/dev/null || launchctl bootstrap "gui/$(id -u)" "${PLIST_DST}"
+
 
 echo "Done! AutoCap is now running in the background."
 echo "Logs: /tmp/autocap.log"
